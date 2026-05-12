@@ -87,8 +87,34 @@ def get_obj(df_obj, fytd, campo):
 
 def color_obj(v, obj):
     if pd.isna(v) or isinstance(v, str) or obj == 0: return ""
-    if v >= obj: return "background-color:#ccffcc;color:black;font-weight:bold"
-    return "background-color:#ffcccc;color:black;font-weight:bold"
+    if v >= obj: return "background-color: #CCFFCC; color: #1A1A2E; font-weight: bold;"
+    return "background-color: #FFCCCC; color: #1A1A2E; font-weight: bold;"
+
+def style_total_general(row):
+    if row.name == "TOTAL GENERAL":
+        return ["background-color: #E8E8E8; font-weight: bold;"] * len(row)
+    return [""] * len(row)
+
+def style_pct_columns(df, obj_tre=None, obj_isc=None, pct_cols=[]):
+    def apply_style(row):
+        styles = [""] * len(row)
+        for col in pct_cols:
+            if col in row.index and col == 'TRE %' and obj_tre is not None:
+                idx = row.index.get_loc(col)
+                if pd.notna(row[col]) and isinstance(row[col], (int, float)):
+                    if row[col] >= obj_tre:
+                        styles[idx] = "background-color: #CCFFCC; color: #1A1A2E; font-weight: bold;"
+                    else:
+                        styles[idx] = "background-color: #FFCCCC; color: #1A1A2E; font-weight: bold;"
+            elif col in row.index and col in ['% ISC', '%ISC'] and obj_isc is not None:
+                idx = row.index.get_loc(col)
+                if pd.notna(row[col]) and isinstance(row[col], (int, float)):
+                    if row[col] >= obj_isc:
+                        styles[idx] = "background-color: #CCFFCC; color: #1A1A2E; font-weight: bold;"
+                    else:
+                        styles[idx] = "background-color: #FFCCCC; color: #1A1A2E; font-weight: bold;"
+        return styles
+    return apply_style
 
 def fig_to_buf(fig):
     buf = io.BytesIO()
@@ -224,8 +250,6 @@ def meses_de(df, fytd, ciudad=None, dealer=None):
     if d.empty: return []
     return sorted(d.drop_duplicates("mes_anio").sort_values("orden_mes")["mes_anio"].tolist())
 
-def tabla_html(styled): return f"<div class='table-scroll'>{styled.to_html()}</div>"
-
 def kpi_html(label,val,fmt="{:.1%}",sub="",color="#1A1A2E"):
     v=fmt.format(val) if val is not None else "—"
     return f"""<div class='kpi-card'><div class='kpi-label'>{label}</div>
@@ -249,22 +273,16 @@ html,body,[class*="css"]{font-family:'Barlow',sans-serif!important}
 [data-testid="stSidebar"] hr{border-color:rgba(255,255,255,0.12)!important}
 section[data-testid="stMain"]{background:#F5F6FA!important}
 .block-container{padding-top:1rem!important;max-width:100%!important}
-.ciudad-banner{background:#1A1A2E;border-radius:10px;padding:12px 20px;margin-bottom:16px;display:flex;align-items:center;gap:16px}
-.ciudad-label{font-family:'Barlow Condensed',sans-serif;font-size:13px;font-weight:700;color:#FFD600;letter-spacing:1px;text-transform:uppercase;white-space:nowrap}
 .seccion-titulo{font-family:'Barlow Condensed',sans-serif;font-size:26px;font-weight:900;color:#1A1A2E;letter-spacing:1px;text-transform:uppercase;border-bottom:3px solid #FFD600;padding-bottom:6px;margin-bottom:16px}
 .kpi-card{background:white;border-radius:10px;padding:14px 18px;box-shadow:0 2px 8px rgba(0,0,0,0.08);border-top:4px solid #1A1A2E;text-align:center}
 .kpi-label{font-family:'Barlow Condensed',sans-serif;font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:#666;margin-bottom:2px}
 .kpi-value{font-family:'Barlow Condensed',sans-serif;font-size:34px;font-weight:900;color:#1A1A2E;line-height:1}
 .kpi-sub{font-size:11px;color:#999;margin-top:2px}
 .chart-box{background:white;border-radius:10px;padding:16px 20px;box-shadow:0 2px 8px rgba(0,0,0,0.07);margin-bottom:16px}
-.tabla-voc th{background:#1A1A2E!important;color:white!important;font-family:'Barlow Condensed',sans-serif;font-size:12px;font-weight:700;text-align:center;padding:7px 8px}
-.tabla-voc td{font-size:12px;text-align:center;padding:5px 8px;color:#1A1A1A}
-.tabla-voc tr:nth-child(even) td{background:#F8F8F8}
 .alerta-card{background:#fff3f3;border-left:5px solid #D32F2F;border-radius:6px;padding:10px 14px;margin-bottom:8px;font-family:'Barlow Condensed',sans-serif}
 .alerta-card .an{font-size:15px;font-weight:700;color:#1A1A1A}
 .alerta-card .av{font-size:20px;font-weight:900;color:#D32F2F}
 .alerta-card .ag{font-size:12px;color:#888}
-.table-scroll{overflow-x:auto;border-radius:8px}
 div[data-testid="stSelectbox"] label p{font-weight:700!important;font-size:12px!important;color:#1A1A2E!important;text-transform:uppercase;letter-spacing:0.5px}
 </style>
 """, unsafe_allow_html=True)
@@ -439,7 +457,21 @@ def render_general():
         ds=df_show[["dealer","E","C","F","prom_tre","i16","i78","prom_isc"]].copy()
         ds.columns=["Nombre","Env.","Comp.","Falta","TRE %","1-6","7-8","%ISC"]
         
-        st.dataframe(ds, use_container_width=True, hide_index=True)
+        styled_df = ds.style.apply(style_total_general, axis=1).apply(style_pct_columns(ds, obj_tre, obj_isc, ['TRE %', '%ISC']), axis=1).format({
+            'TRE %': '{:.1%}',
+            '%ISC': '{:.1%}',
+            'Env.': '{:.0f}',
+            'Comp.': '{:.0f}',
+            'Falta': '{:.0f}',
+            '1-6': '{:.0f}',
+            '7-8': '{:.0f}'
+        }).set_properties(**{'text-align': 'center'}).set_table_styles([
+            {'selector': 'th', 'props': [('background-color', '#1A1A2E'), ('color', 'white'), ('font-weight', 'bold'), ('text-align', 'center'), ('padding', '10px')]},
+            {'selector': 'td', 'props': [('padding', '8px'), ('border', '1px solid #E0E0E0')]},
+            {'selector': 'tr:nth-child(even)', 'props': [('background-color', '#F8F8F8')]}
+        ])
+        
+        st.dataframe(styled_df, use_container_width=True, hide_index=True)
         
         img_bytes = cached_image_gen(ds, 'gral', obj_tre, obj_isc)
         if img_bytes:
@@ -465,7 +497,20 @@ def render_general():
             ds_ap = df_af[["aps_nombre","E","C","prom_tre","i16","i78","prom_isc"]].copy()
             ds_ap.columns = ["Nombre","Enviadas","Completadas","TRE %","1-6","7-8","% ISC"]
             
-            st.dataframe(ds_ap, use_container_width=True, hide_index=True)
+            styled_ap = ds_ap.style.apply(style_total_general, axis=1).apply(style_pct_columns(ds_ap, obj_tre, obj_isc, ['TRE %', '% ISC']), axis=1).format({
+                'TRE %': '{:.1%}',
+                '% ISC': '{:.1%}',
+                'Enviadas': '{:.0f}',
+                'Completadas': '{:.0f}',
+                '1-6': '{:.0f}',
+                '7-8': '{:.0f}'
+            }).set_properties(**{'text-align': 'center'}).set_table_styles([
+                {'selector': 'th', 'props': [('background-color', '#1A1A2E'), ('color', 'white'), ('font-weight', 'bold'), ('text-align', 'center'), ('padding', '10px')]},
+                {'selector': 'td', 'props': [('padding', '8px'), ('border', '1px solid #E0E0E0')]},
+                {'selector': 'tr:nth-child(even)', 'props': [('background-color', '#F8F8F8')]}
+            ])
+            
+            st.dataframe(styled_ap, use_container_width=True, hide_index=True)
             
             img_bytes_aps = cached_image_gen(ds_ap, 'aps', obj_tre, obj_isc)
             if img_bytes_aps:
@@ -476,6 +521,12 @@ def render_general():
             ds_validos = validos[["aps_nombre", "prom_tre", "prom_isc"]].rename(columns={"aps_nombre":"Nombre", "prom_tre":"TRE %", "prom_isc":"% ISC"})
             
             if not ds_validos.empty:
+                styled_top = ds_validos.nlargest(3,"% ISC").style.apply(style_pct_columns(ds_validos.nlargest(3,"% ISC"), obj_tre, obj_isc, ['TRE %', '% ISC']), axis=1).format({'TRE %': '{:.1%}', '% ISC': '{:.1%}'}).set_properties(**{'text-align': 'center'})
+                styled_bot = ds_validos.nsmallest(3,"% ISC").style.apply(style_pct_columns(ds_validos.nsmallest(3,"% ISC"), obj_tre, obj_isc, ['TRE %', '% ISC']), axis=1).format({'TRE %': '{:.1%}', '% ISC': '{:.1%}'}).set_properties(**{'text-align': 'center'})
+                
+                c_t.dataframe(styled_top, use_container_width=True, hide_index=True)
+                c_b.dataframe(styled_bot, use_container_width=True, hide_index=True)
+                
                 img_top = cached_image_gen(ds_validos.nlargest(3,"% ISC"), 'topbot', obj_tre, obj_isc)
                 img_bot = cached_image_gen(ds_validos.nsmallest(3,"% ISC"), 'topbot', obj_tre, obj_isc)
                 
@@ -956,6 +1007,9 @@ def render_atributos():
             cols_orden = ['Atributo'] + dealers_en_datos + ['GENERAL', 'Objetivo', 'GAP']
             df_resumen = df_resumen[[c for c in cols_orden if c in df_resumen.columns]]
         cols_cache = tuple(dealers_en_datos + ["GENERAL"])
+        
+        styled_attr = df_resumen.style.apply(lambda x: ['background-color: #A6A6A6; color: black; font-weight: bold;' if c == 'Atributo' else (color_obj(x['GENERAL'], x['Objetivo']) if c == 'GENERAL' else (color_obj(x[d], x['Objetivo']) if c in dealers_en_datos else ('color: #D32F2F; font-weight: bold;' if c == 'GAP' and x['GAP'] < 0 else ('color: #388E3C; font-weight: bold;' if c == 'GAP' and x['GAP'] > 0 else '')))) for c in df_resumen.columns], axis=1).format({col: '{:.1%}' for col in df_resumen.columns if col not in ['Atributo', 'GAP']}, {'GAP': '{:+.1%}'})
+        
     elif not usar_aps_nivel and dealer_sel != "GENERAL":
         aps_en_datos = sorted([a for a in df_act_current["aps_nombre"].unique() if a != "SIN ASESOR"])
         vals_aps = {a: calc_atr_vals(meses_act_eval, df_act[df_act["aps_nombre"] == a]) for a in aps_en_datos}
@@ -975,6 +1029,9 @@ def render_atributos():
             cols_orden = ['Atributo'] + aps_en_datos + ['GENERAL', 'Objetivo', 'GAP']
             df_resumen = df_resumen[[c for c in cols_orden if c in df_resumen.columns]]
         cols_cache = tuple(aps_en_datos + ["GENERAL"])
+        
+        styled_attr = df_resumen.style.apply(lambda x: ['background-color: #A6A6A6; color: black; font-weight: bold;' if c == 'Atributo' else (color_obj(x['GENERAL'], x['Objetivo']) if c == 'GENERAL' else (color_obj(x[aps], x['Objetivo']) if c in aps_en_datos else ('color: #D32F2F; font-weight: bold;' if c == 'GAP' and x['GAP'] < 0 else ('color: #388E3C; font-weight: bold;' if c == 'GAP' and x['GAP'] > 0 else '')))) for c in df_resumen.columns], axis=1).format({col: '{:.1%}' for col in df_resumen.columns if col not in ['Atributo', 'GAP']}, {'GAP': '{:+.1%}'})
+        
     else:
         data_tbl = []
         todos_atributos = sorted([a for a in set(vals_act_main.keys()).union(set(vals_prev_main.keys())) if "bien a la primera h1" not in a.lower()])
@@ -988,8 +1045,16 @@ def render_atributos():
             df_resumen = df_resumen.sort_values(by='%', ascending=True).reset_index(drop=True)
             df_resumen = df_resumen[['Atributo', '%', 'Objetivo', 'GAP']]
         cols_cache = tuple(["%"])
+        
+        styled_attr = df_resumen.style.apply(lambda x: ['background-color: #A6A6A6; color: black; font-weight: bold;' if c == 'Atributo' else (color_obj(x['%'], x['Objetivo']) if c == '%' else ('color: #D32F2F; font-weight: bold;' if c == 'GAP' and x['GAP'] < 0 else ('color: #388E3C; font-weight: bold;' if c == 'GAP' and x['GAP'] > 0 else ''))) for c in df_resumen.columns], axis=1).format({'%': '{:.1%}', 'Objetivo': '{:.1%}', 'GAP': '{:+.1%}'})
 
-    st.dataframe(df_resumen, use_container_width=True, hide_index=True)
+    styled_attr = styled_attr.set_properties(**{'text-align': 'center'}).set_table_styles([
+        {'selector': 'th', 'props': [('background-color', '#1A1A2E'), ('color', 'white'), ('font-weight', 'bold'), ('text-align', 'center'), ('padding', '10px')]},
+        {'selector': 'td', 'props': [('padding', '8px'), ('border', '1px solid #E0E0E0')]},
+        {'selector': 'tr:nth-child(even)', 'props': [('background-color', '#F8F8F8')]}
+    ])
+    
+    st.dataframe(styled_attr, use_container_width=True, hide_index=True)
     
     img_bytes = cached_image_attr_table(df_resumen, cols_cache)
     if img_bytes:
@@ -997,7 +1062,7 @@ def render_atributos():
 
     col_eval = 'GENERAL' if not usar_aps_nivel else '%'
     if not df_resumen.empty:
-        st.markdown("<div style='margin-top:20px; margin-bottom:15px; font-weight:900; color:#1A1A1A; font-size:22px;'>Atributos en Alerta</div>", unsafe_allow_html=True)
+        st.markdown("<div style='margin-top:20px; margin-bottom:15px; font-weight:900; color:#1A1A2E; font-size:22px;'>Atributos en Alerta</div>", unsafe_allow_html=True)
         alertas = df_resumen[df_resumen[col_eval] < df_resumen['Objetivo']]
         if alertas.empty: st.success("✅ Todo sobre el objetivo.")
         else:
@@ -1330,7 +1395,13 @@ def render_pendientes():
     ds_p = ds_p.sort_values("Asesor").reset_index(drop=True)
     ds_p["Celular"] = ds_p["Celular"].astype(str).str.replace(".0","",regex=False)
     
-    st.dataframe(ds_p, use_container_width=True, hide_index=True)
+    styled_pend = ds_p.style.apply(lambda x: ['color: #D32F2F; font-weight: bold;' if x['Estado'] == 'Expirado' else ('color: #FF8C00; font-weight: bold;' if x['Estado'] == 'Contacto en uso' else '') for c in x.index], axis=1).set_properties(**{'text-align': 'center'}).set_table_styles([
+        {'selector': 'th', 'props': [('background-color', '#1A1A2E'), ('color', 'white'), ('font-weight', 'bold'), ('text-align', 'center'), ('padding', '10px')]},
+        {'selector': 'td', 'props': [('padding', '8px'), ('border', '1px solid #E0E0E0')]},
+        {'selector': 'tr:nth-child(even)', 'props': [('background-color', '#F8F8F8')]}
+    ])
+    
+    st.dataframe(styled_pend, use_container_width=True, hide_index=True)
     
     if not ds_p.empty:
         img_bytes = cached_image_pendientes(ds_p, 'pendientes')
@@ -1368,7 +1439,15 @@ def render_pendientes():
         for col in ["Total Enviadas", "Completadas", "Vencidas", "Pendientes"]:
             if col in res_a.columns: res_a[col] = res_a[col].astype(int)
 
-    st.dataframe(res_a, use_container_width=True, hide_index=True)
+    styled_res = res_a.style.apply(lambda x: ['background-color: #FFCCCC; font-weight: bold;' if x['Vencidas'] > 0 else ('background-color: #E8E8E8; font-weight: bold;' if x['Asesor'] == 'TOTAL GENERAL' else '') for c in x.index], axis=1).format({
+        'Total Enviadas': '{:.0f}', 'Completadas': '{:.0f}', 'Vencidas': '{:.0f}', 'Pendientes': '{:.0f}'
+    }).set_properties(**{'text-align': 'center'}).set_table_styles([
+        {'selector': 'th', 'props': [('background-color', '#1A1A2E'), ('color', 'white'), ('font-weight', 'bold'), ('text-align', 'center'), ('padding', '10px')]},
+        {'selector': 'td', 'props': [('padding', '8px'), ('border', '1px solid #E0E0E0')]},
+        {'selector': 'tr:nth-child(even)', 'props': [('background-color', '#F8F8F8')]}
+    ])
+    
+    st.dataframe(styled_res, use_container_width=True, hide_index=True)
     
     if not res_a.empty:
         img_bytes = cached_image_pendientes(res_a, 'resumen')
@@ -1507,9 +1586,6 @@ def render_vista_aps():
     st.markdown("""
         <style>
             .stSelectbox label p { font-size: 18px !important; font-weight: bold !important; color: #1A1A2E !important; }
-            .tabla-voc { border: 2px solid #1A1A2E !important; border-collapse: collapse !important; width: 100% !important; }
-            .tabla-voc td { font-size: 18px !important; color: #000000 !important; font-weight: bold !important; border: 1px solid #CFD8DC !important; padding: 8px !important; }
-            .tabla-voc th { font-size: 18px !important; color: #FFFFFF !important; background-color: #1A1A2E !important; font-weight: bold !important; border: 1px solid #1A1A2E !important; padding: 10px !important; text-align: center !important; }
         </style>
     """, unsafe_allow_html=True)
 
@@ -1633,7 +1709,10 @@ def render_vista_aps():
     df_p_show = aplicar_filtro_ciudad(D["pendientes"], CIUDAD).query(f"aps_nombre=='{aps_sel}' and status=='Contacto en uso'")[["cliente_nombre", "cliente_celular", "fecha_validez"]]
     if not df_p_show.empty:
         df_p_show.columns = ["Nombre del Cliente", "Celular de Contacto", "Vence en"]
-        st.dataframe(df_p_show, use_container_width=True, hide_index=True)
+        st.dataframe(df_p_show.style.set_properties(**{'text-align': 'center'}).set_table_styles([
+            {'selector': 'th', 'props': [('background-color', '#1A1A2E'), ('color', 'white'), ('font-weight', 'bold'), ('text-align', 'center'), ('padding', '10px')]},
+            {'selector': 'td', 'props': [('padding', '8px'), ('border', '1px solid #E0E0E0')]}
+        ]), use_container_width=True, hide_index=True)
     else: st.success("¡Sin pendientes!")
     st.markdown("</div>", unsafe_allow_html=True)
 
