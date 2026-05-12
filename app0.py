@@ -11,7 +11,6 @@ from scipy.interpolate import make_interp_spline
 import io, textwrap
 import os
 from pathlib import Path
-import dataframe_image as dfi
 from PIL import Image
 
 st.set_page_config(page_title="Portal VoC Taiyo", layout="wide", initial_sidebar_state="expanded")
@@ -98,41 +97,114 @@ def fig_to_buf(fig):
     plt.close(fig); buf.seek(0); return buf
 
 def styler_to_jpg_buf(styler):
-    estilos_taiyo = [
-        {'selector': 'th', 'props': [
-            ('background-color', '#1A1A2E !important'), 
-            ('color', 'white !important'), 
-            ('font-family', 'sans-serif'), 
-            ('font-size', '14px'), 
-            ('font-weight', 'bold'), 
-            ('text-align', 'center'), 
-            ('padding', '10px 12px'),
-            ('border', 'none')
-        ]},
-        {'selector': 'td', 'props': [
-            ('font-family', 'sans-serif'), 
-            ('font-size', '13px'), 
-            ('text-align', 'center'), 
-            ('padding', '8px 12px'), 
-            ('color', '#1A1A1A'),
-            ('border', '1px solid #F0F0F0')
-        ]},
-        {'selector': 'table', 'props': [
-            ('border-collapse', 'collapse'),
-            ('border', 'none')
-        ]}
-    ]
-    styler.set_table_styles(estilos_taiyo, overwrite=False)
-    png_buf = io.BytesIO()
-    dfi.export(styler, png_buf, max_rows=-1)
-    png_buf.seek(0)
-    img = Image.open(png_buf)
-    fondo_blanco = Image.new("RGB", img.size, (255, 255, 255))
-    fondo_blanco.paste(img, mask=img.split()[3] if len(img.split()) == 4 else None)
-    jpg_buf = io.BytesIO()
-    fondo_blanco.save(jpg_buf, format='JPEG', quality=100)
-    jpg_buf.seek(0)
-    return jpg_buf
+    """
+    Convierte un pandas Styler a JPEG usando matplotlib.
+    Extrae colores y texto exactos del HTML renderizado por pandas.
+    No requiere Playwright, Chromium ni dataframe_image.
+    """
+    import re as _re
+
+    html = styler.to_html()
+
+    # 1. Style map: (row, col) -> props dict
+    style_map = {}
+    style_block = _re.search(r'<style[^>]*>(.*?)</style>', html, _re.DOTALL)
+    if style_block:
+        for selector_raw, props_raw in _re.findall(r'([^{}]+)\{([^{}]+)\}', style_block.group(1)):
+            props = {}
+            for decl in props_raw.split(";"):
+                if ":" not in decl: continue
+                k, v = decl.split(":", 1)
+                props[k.strip()] = v.strip()
+            if not props: continue
+            for m in _re.finditer(r'_row(\d+)_col(\d+)', selector_raw):
+                style_map[(int(m.group(1)), int(m.group(2)))] = props
+
+    # 2. Cabeceras desde <th> con id nivel col
+    th_matches = _re.findall(r'<th[^>]*id="T_\w+_level0_col(\d+)"[^>]*>([\s\S]*?)</th>', html)
+    headers_by_col = {int(col_s): _re.sub(r'<[^>]+>', '', content).strip()
+                      for col_s, content in th_matches}
+    data_col_ids = sorted(headers_by_col.keys())
+    header_texts = [headers_by_col[c] for c in data_col_ids]
+
+    # 3. Filas desde <tbody>
+    rows_data = []
+    tbody = _re.search(r'<tbody>([\s\S]*?)</tbody>', html)
+    if tbody:
+        for tr in _re.findall(r'<tr>([\s\S]*?)</tr>', tbody.group(1)):
+            td_matches = _re.findall(
+                r'<td[^>]*id="T_\w+_row(\d+)_col(\d+)"[^>]*>([\s\S]*?)</td>', tr)
+            if not td_matches: continue
+            td_by_col = {}
+            for ri_s, ci_s, content in td_matches:
+                ri, ci = int(ri_s), int(ci_s)
+                text  = _re.sub(r'<[^>]+>', '', content).strip()
+                props = style_map.get((ri, ci), {})
+                bg    = props.get("background-color", "#FFFFFF")
+                fg    = props.get("color", "#1A1A1A")
+                bold  = props.get("font-weight", "") in ("bold", "700")
+                td_by_col[ci] = (text, bg, fg, bold)
+            row = [td_by_col.get(ci, ("", "#FFFFFF", "#1A1A1A", False)) for ci in data_col_ids]
+            if row: rows_data.append(row)
+
+    # Fallback
+    if not rows_data or not header_texts:
+        df2 = styler.data
+        header_texts = list(df2.columns)
+        data_col_ids = list(range(len(header_texts)))
+        rows_data = [[(str(v), "#FFFFFF", "#1A1A1A", False) for v in r] for r in df2.values]
+
+    n_rows = len(rows_data)
+
+    # 4. Anchos de columna proporcionales
+    col_max = [len(str(h)) for h in header_texts]
+    for row in rows_data:
+        for ci, (txt, *_) in enumerate(row):
+            if ci < len(col_max): col_max[ci] = max(col_max[ci], len(str(txt)))
+    total = sum(col_max) or 1
+    col_w = [c / total for c in col_max]
+    fig_w = max(8, min(26, total * 0.20 + 1.0))
+    row_h = 0.44; hdr_h = 0.56; fig_h = hdr_h + row_h * n_rows + 0.2
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), facecolor="white")
+    ax.set_xlim(0, 1); ax.set_ylim(0, fig_h); ax.axis("off")
+
+    # 5. Cabecera
+    x = 0.0; y_hdr = fig_h - hdr_h
+    for h, cw in zip(header_texts, col_w):
+        ax.add_patch(plt.Rectangle((x, y_hdr), cw, hdr_h,
+                     facecolor="#1A1A2E", edgecolor="white", linewidth=0.5))
+        words = str(h).split(); line = ""; lines = []
+        for w in words:
+            test = (line + " " + w).strip()
+            if len(test) > max(8, int(cw * total * 0.45)):
+                if line: lines.append(line)
+                line = w
+            else:
+                line = test
+        if line: lines.append(line)
+        ax.text(x + cw/2, y_hdr + hdr_h/2, "\n".join(lines),
+                ha="center", va="center", fontsize=7.0 if len(lines)>1 else 7.5,
+                fontweight="bold", color="white", linespacing=1.3)
+        x += cw
+
+    # 6. Filas
+    for ri, row in enumerate(rows_data):
+        y_row = fig_h - hdr_h - row_h * (ri + 1); x = 0.0
+        def_bg = "#F5F5F5" if ri % 2 == 1 else "#FFFFFF"
+        for ci, cw in enumerate(col_w):
+            txt, bg, fg, bold = row[ci] if ci < len(row) else ("", def_bg, "#1A1A1A", False)
+            cell_bg = bg if bg not in ("#FFFFFF", "", "white") else def_bg
+            ax.add_patch(plt.Rectangle((x, y_row), cw, row_h,
+                         facecolor=cell_bg, edgecolor="#E8E8E8", linewidth=0.3))
+            ax.text(x + cw/2, y_row + row_h/2, str(txt),
+                    ha="center", va="center", fontsize=7,
+                    fontweight="bold" if bold else "normal", color=fg)
+            x += cw
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="jpeg", facecolor="white", bbox_inches="tight", dpi=180)
+    plt.close(fig); buf.seek(0); return buf
 
 def aplicar_filtro_ciudad(df, ciudad):
     if ciudad=="TODAS" or "ciudad" not in df.columns: return df

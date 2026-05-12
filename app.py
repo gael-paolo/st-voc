@@ -544,8 +544,9 @@ def render_general():
     st.markdown("<h3 style='text-align:center; color:#1A1A2E; font-family:\"Barlow Condensed\", sans-serif; font-size: 26px; text-transform: uppercase;'>Atributos Especiales</h3>", unsafe_allow_html=True)
     
     nombres_especiales = ["Bien a la primera H1", "Customer Expectations CES", "Alertas atendidas en 24 Hrs"]
-    ruta_esp = CARPETA_DATOS / "11_atributos_especiales.csv"
-    df_esp = pd.read_csv(ruta_esp) if ruta_esp.exists() else pd.DataFrame()
+
+    # Bug fix: usar D["especiales"] (cargado desde GCS) en vez de leer archivo local
+    df_esp = D["especiales"].copy() if not D["especiales"].empty else pd.DataFrame()
     
     import unicodedata
     def norm_t(t): return unicodedata.normalize('NFKD', str(t).strip().lower()).encode('ASCII', 'ignore').decode('utf-8') if pd.notna(t) else ""
@@ -556,6 +557,8 @@ def render_general():
     if not df_esp.empty:
         df_esp['fytd'] = df_esp['fytd'].astype(str).str.strip().str.upper()
         df_esp['mes'] = df_esp['mes'].astype(str).str.strip().str.capitalize()
+        if 'ciudad' in df_esp.columns:
+            df_esp['ciudad'] = df_esp['ciudad'].astype(str).str.strip().str.upper()
     
     meses_cortos = [str(m).split()[0].strip().capitalize() for m in meses_a_procesar]
     fytd_str = str(fytd_sel).strip().upper()
@@ -563,7 +566,11 @@ def render_general():
     for i, attr_name in enumerate(nombres_especiales):
         val_actual = 0.0
         if not df_esp.empty and meses_cortos:
-            row_e = df_esp[(df_esp['fytd'] == fytd_str) & (df_esp['mes'].isin(meses_cortos))]
+            # Bug fix: filtrar también por ciudad activa
+            mask = (df_esp['fytd'] == fytd_str) & (df_esp['mes'].isin(meses_cortos))
+            if 'ciudad' in df_esp.columns and CIUDAD != "TODAS":
+                mask = mask & (df_esp['ciudad'] == CIUDAD.upper())
+            row_e = df_esp[mask]
             if not row_e.empty and attr_name in row_e.columns: 
                 v_mean = row_e[attr_name].mean()
                 val_actual = float(v_mean) if pd.notna(v_mean) else 0.0
@@ -2045,12 +2052,19 @@ def construir_pdf(fytd_sel, mes_sel, dealer_sel, aps_sel, acum, ciudad, mm):
         pdf.savefig(fig_dual, bbox_inches='tight', dpi=300); plt.close(fig_dual)
 
         # 3. ATRIBUTOS ESPECIALES
-        ruta_esp = CARPETA_DATOS / "11_atributos_especiales.csv"
-        df_esp = pd.read_csv(ruta_esp) if ruta_esp.exists() else pd.DataFrame()
-        if not df_esp.empty:
+        df_esp_pdf = D["especiales"].copy() if not D["especiales"].empty else pd.DataFrame()
+        if not df_esp_pdf.empty:
+            df_esp_pdf['fytd'] = df_esp_pdf['fytd'].astype(str).str.strip().str.upper()
+            df_esp_pdf['mes']  = df_esp_pdf['mes'].astype(str).str.strip().str.capitalize()
+            if 'ciudad' in df_esp_pdf.columns:
+                df_esp_pdf['ciudad'] = df_esp_pdf['ciudad'].astype(str).str.strip().str.upper()
+        if not df_esp_pdf.empty:
             f3, _ = preparar_diapositiva("Indicadores Especiales de Servicio")
             meses_cortos = [str(m).split()[0].strip().capitalize() for m in meses_proc]
-            row_e = df_esp[(df_esp['fytd'] == fytd_sel.strip().upper()) & (df_esp['mes'].isin(meses_cortos))]
+            mask_pdf = (df_esp_pdf['fytd'] == fytd_sel.strip().upper()) & (df_esp_pdf['mes'].isin(meses_cortos))
+            if 'ciudad' in df_esp_pdf.columns and CIUDAD != "TODAS":
+                mask_pdf = mask_pdf & (df_esp_pdf['ciudad'] == CIUDAD.upper())
+            row_e = df_esp_pdf[mask_pdf]
             names = ["Bien a la primera H1", "Customer Expectations CES", "Alertas atendidas en 24 Hrs"]
             import unicodedata
             def n_t(t): return unicodedata.normalize('NFKD', str(t).strip().lower()).encode('ASCII', 'ignore').decode('utf-8') if pd.notna(t) else ""
