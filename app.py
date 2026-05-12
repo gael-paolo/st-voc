@@ -43,6 +43,7 @@ MARKERS_DEALERS = {
 # ==============================================================================
 from google.cloud import storage
 from google.oauth2 import service_account
+import io
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def cargar_datos():
@@ -87,154 +88,127 @@ def get_obj(df_obj, fytd, campo):
 
 def color_obj(v, obj):
     if pd.isna(v) or isinstance(v, str) or obj == 0: return ""
-    if v >= obj: return "background-color: #CCFFCC; color: #1A1A2E; font-weight: bold;"
-    return "background-color: #FFCCCC; color: #1A1A2E; font-weight: bold;"
-
-def style_total_general(row):
-    if row.name == "TOTAL GENERAL":
-        return ["background-color: #E8E8E8; font-weight: bold;"] * len(row)
-    return [""] * len(row)
-
-def style_pct_columns(df, obj_tre=None, obj_isc=None, pct_cols=[]):
-    def apply_style(row):
-        styles = [""] * len(row)
-        for col in pct_cols:
-            if col in row.index and col == 'TRE %' and obj_tre is not None:
-                idx = row.index.get_loc(col)
-                if pd.notna(row[col]) and isinstance(row[col], (int, float)):
-                    if row[col] >= obj_tre:
-                        styles[idx] = "background-color: #CCFFCC; color: #1A1A2E; font-weight: bold;"
-                    else:
-                        styles[idx] = "background-color: #FFCCCC; color: #1A1A2E; font-weight: bold;"
-            elif col in row.index and col in ['% ISC', '%ISC'] and obj_isc is not None:
-                idx = row.index.get_loc(col)
-                if pd.notna(row[col]) and isinstance(row[col], (int, float)):
-                    if row[col] >= obj_isc:
-                        styles[idx] = "background-color: #CCFFCC; color: #1A1A2E; font-weight: bold;"
-                    else:
-                        styles[idx] = "background-color: #FFCCCC; color: #1A1A2E; font-weight: bold;"
-        return styles
-    return apply_style
+    if v >= obj: return "background-color:#ccffcc;color:black;font-weight:bold"
+    return "background-color:#ffcccc;color:black;font-weight:bold"
 
 def fig_to_buf(fig):
     buf = io.BytesIO()
     fig.savefig(buf, format="jpeg", facecolor="white", bbox_inches="tight", dpi=150)
     plt.close(fig); buf.seek(0); return buf
 
-def df_to_image(df, title="", obj_tre=None, obj_isc=None, highlight_total=True):
-    if df.empty:
-        return None
-    
-    fig_width = max(10, len(df.columns) * 1.2)
-    fig_height = max(3, len(df) * 0.5 + 1.5)
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height), facecolor='white')
-    ax.axis('off')
-    
-    if title:
-        ax.set_title(title, fontsize=14, fontweight='bold', color='#1A1A2E', pad=20, loc='center')
-    
-    pct_cols = [col for col in df.columns if '%' in col or col in ['TRE %', '% ISC', '%ISC']]
-    
-    formatted_data = []
-    for _, row in df.iterrows():
-        formatted_row = []
-        for col in df.columns:
-            val = row[col]
-            if col in pct_cols and isinstance(val, (int, float)):
-                formatted_row.append(f"{val:.1%}")
-            elif isinstance(val, (int, float)):
-                formatted_row.append(f"{val:.0f}")
+def styler_to_jpg_buf(styler):
+    """
+    Convierte un pandas Styler a JPEG usando matplotlib.
+    Reemplaza dataframe_image (que requiere Playwright/Chromium).
+    Compatible con Streamlit Cloud sin dependencias de browser.
+    """
+    df = styler.data.copy()
+    n_rows, n_cols = df.shape
+
+    # Obtener estilos aplicados celda a celda
+    rendered = styler.export()  # dict de estilos internos
+    try:
+        # Intentar obtener el mapa de colores del styler renderizado
+        style_map = {}
+        ctx = styler._translate(sparse_index=False, sparse_columns=False)
+        for row_data in ctx.get("body", []):
+            for cell in row_data:
+                r = cell.get("row", 0)
+                c_idx = cell.get("col", -1)
+                if c_idx < 0: continue
+                props_str = cell.get("props", "")
+                style_map[(r, c_idx)] = props_str
+    except Exception:
+        style_map = {}
+
+    def parse_bg(props):
+        bg, fg, bold = "#FFFFFF", "#1A1A1A", False
+        if not props: return bg, fg, bold
+        for part in props.split(";"):
+            part = part.strip()
+            if part.startswith("background-color:"):
+                bg = part.split(":")[1].strip()
+            elif part.startswith("color:"):
+                fg = part.split(":")[1].strip()
+            if "bold" in part:
+                bold = True
+        return bg, fg, bold
+
+    # Formatear valores con el formato del styler
+    try:
+        fmt_df = styler.to_pandas() if hasattr(styler, "to_pandas") else df
+    except Exception:
+        fmt_df = df
+
+    # Obtener texto formateado
+    try:
+        rendered_html = styler.render() if hasattr(styler, "render") else ""
+    except Exception:
+        rendered_html = ""
+
+    # Usar formato aplicado al exportar a excel-like dict
+    cell_text = []
+    for ri in range(n_rows):
+        row_txt = []
+        for ci, col in enumerate(df.columns):
+            v = df.iloc[ri, ci]
+            if pd.isna(v):
+                row_txt.append("—")
+            elif isinstance(v, float):
+                row_txt.append(f"{v:.1%}" if 0 <= abs(v) <= 1.5 else f"{v:,.1f}")
             else:
-                formatted_row.append(str(val))
-        formatted_data.append(formatted_row)
-    
-    col_labels = df.columns.tolist()
-    table = ax.table(
-        cellText=formatted_data,
-        colLabels=col_labels,
-        colColours=['#1A1A2E'] * len(col_labels),
-        loc='center',
-        cellLoc='center',
-        colLoc='center'
-    )
-    
-    table.auto_set_font_size(False)
-    table.set_fontsize(9)
-    table.scale(1.2, 1.5)
-    
-    for j in range(len(col_labels)):
-        cell = table[(0, j)]
-        cell.set_text_props(color='white', fontweight='bold')
-        cell.set_facecolor('#1A1A2E')
-        cell.set_edgecolor('#1A1A2E')
-        cell.set_linewidth(1)
-    
-    for i in range(len(df)):
-        row_name = str(df.iloc[i, 0]) if len(df.columns) > 0 else ""
-        
-        for j in range(len(df.columns)):
-            cell = table[(i + 1, j)]
-            
-            if i % 2 == 0:
-                cell.set_facecolor('#F8F8F8')
-            else:
-                cell.set_facecolor('white')
-            cell.set_edgecolor('#E0E0E0')
-            cell.set_linewidth(0.5)
-            
-            if highlight_total and row_name == "TOTAL GENERAL":
-                cell.set_facecolor('#E8E8E8')
-                cell.set_text_props(fontweight='bold')
-            
-            if obj_tre is not None and col_labels[j] == 'TRE %':
-                try:
-                    val = df.iloc[i, j]
-                    if isinstance(val, (int, float)):
-                        if val >= obj_tre:
-                            cell.set_facecolor('#CCFFCC')
-                            cell.set_text_props(fontweight='bold')
-                        else:
-                            cell.set_facecolor('#FFCCCC')
-                except:
-                    pass
-            
-            if obj_isc is not None and col_labels[j] in ['% ISC', '%ISC']:
-                try:
-                    val = df.iloc[i, j]
-                    if isinstance(val, (int, float)):
-                        if val >= obj_isc:
-                            cell.set_facecolor('#CCFFCC')
-                            cell.set_text_props(fontweight='bold')
-                        else:
-                            cell.set_facecolor('#FFCCCC')
-                except:
-                    pass
-    
-    plt.tight_layout()
+                row_txt.append(str(v))
+        cell_text.append(row_txt)
+
+    # Dimensiones figura
+    col_width   = max(1.4, 9.0 / max(n_cols, 1))
+    row_height  = 0.45
+    fig_w       = max(8, col_width * n_cols + 0.5)
+    fig_h       = row_height * (n_rows + 1) + 0.3
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), facecolor="white")
+    ax.set_xlim(0, n_cols)
+    ax.set_ylim(0, n_rows + 1)
+    ax.axis("off")
+
+    # Cabecera
+    for ci, col in enumerate(df.columns):
+        ax.add_patch(plt.Rectangle((ci, n_rows), 1, 1,
+                     facecolor="#1A1A2E", edgecolor="white", linewidth=0.5))
+        ax.text(ci + 0.5, n_rows + 0.5, str(col),
+                ha="center", va="center", fontsize=8,
+                fontweight="bold", color="white", wrap=True)
+
+    # Celdas de datos
+    for ri in range(n_rows):
+        row_inv = n_rows - 1 - ri   # invertir para que fila 0 esté arriba
+        for ci in range(n_cols):
+            props   = style_map.get((ri, ci), "")
+            bg, fg, bold = parse_bg(props)
+
+            # Color alterno si no hay color de fondo explícito
+            if bg == "#FFFFFF" and ri % 2 == 1:
+                bg = "#F5F5F5"
+
+            ax.add_patch(plt.Rectangle((ci, row_inv), 1, 1,
+                         facecolor=bg, edgecolor="#E0E0E0", linewidth=0.3))
+            txt = cell_text[ri][ci]
+            ax.text(ci + 0.5, row_inv + 0.5, txt,
+                    ha="center", va="center", fontsize=7.5,
+                    fontweight="bold" if bold else "normal",
+                    color=fg)
+
+    plt.tight_layout(pad=0.2)
     buf = io.BytesIO()
-    fig.savefig(buf, format='jpeg', facecolor='white', bbox_inches='tight', dpi=150)
+    fig.savefig(buf, format="jpeg", facecolor="white",
+                bbox_inches="tight", dpi=150)
     plt.close(fig)
     buf.seek(0)
-    return buf.getvalue()
+    return buf
 
-@st.cache_data(show_spinner=False, max_entries=15)
-def cached_image_gen(df, table_type, obj_t, obj_i):
-    if df.empty:
-        return None
-    
-    highlight_total = True
-    
-    if table_type == 'gral':
-        title = f"Resumen por Dealer (TRE: {obj_t:.0%} | ISC: {obj_i:.0%})"
-    elif table_type == 'aps':
-        title = f"Detalle por APS"
-    elif table_type == 'topbot':
-        title = "Top/Bottom 3"
-        highlight_total = False
-    else:
-        title = ""
-    
-    return df_to_image(df, title, obj_t, obj_i, highlight_total)
+def aplicar_filtro_ciudad(df, ciudad):
+    if ciudad=="TODAS" or "ciudad" not in df.columns: return df
+    return df[df["ciudad"]==ciudad]
 
 def filtrar(df, fytd=None, mes=None, ciudad=None, dealer=None, aps=None):
     if df.empty: return df
@@ -250,12 +224,13 @@ def meses_de(df, fytd, ciudad=None, dealer=None):
     if d.empty: return []
     return sorted(d.drop_duplicates("mes_anio").sort_values("orden_mes")["mes_anio"].tolist())
 
+def tabla_html(styled): return f"<div class='table-scroll'>{styled.to_html()}</div>"
+
 def kpi_html(label,val,fmt="{:.1%}",sub="",color="#1A1A2E"):
     v=fmt.format(val) if val is not None else "—"
     return f"""<div class='kpi-card'><div class='kpi-label'>{label}</div>
     <div class='kpi-value' style='color:{color}'>{v}</div>
     <div class='kpi-sub'>{sub}</div></div>"""
-
 # ==============================================================================
 # CSS
 # ==============================================================================
@@ -273,16 +248,22 @@ html,body,[class*="css"]{font-family:'Barlow',sans-serif!important}
 [data-testid="stSidebar"] hr{border-color:rgba(255,255,255,0.12)!important}
 section[data-testid="stMain"]{background:#F5F6FA!important}
 .block-container{padding-top:1rem!important;max-width:100%!important}
+.ciudad-banner{background:#1A1A2E;border-radius:10px;padding:12px 20px;margin-bottom:16px;display:flex;align-items:center;gap:16px}
+.ciudad-label{font-family:'Barlow Condensed',sans-serif;font-size:13px;font-weight:700;color:#FFD600;letter-spacing:1px;text-transform:uppercase;white-space:nowrap}
 .seccion-titulo{font-family:'Barlow Condensed',sans-serif;font-size:26px;font-weight:900;color:#1A1A2E;letter-spacing:1px;text-transform:uppercase;border-bottom:3px solid #FFD600;padding-bottom:6px;margin-bottom:16px}
 .kpi-card{background:white;border-radius:10px;padding:14px 18px;box-shadow:0 2px 8px rgba(0,0,0,0.08);border-top:4px solid #1A1A2E;text-align:center}
 .kpi-label{font-family:'Barlow Condensed',sans-serif;font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:#666;margin-bottom:2px}
 .kpi-value{font-family:'Barlow Condensed',sans-serif;font-size:34px;font-weight:900;color:#1A1A2E;line-height:1}
 .kpi-sub{font-size:11px;color:#999;margin-top:2px}
 .chart-box{background:white;border-radius:10px;padding:16px 20px;box-shadow:0 2px 8px rgba(0,0,0,0.07);margin-bottom:16px}
+.tabla-voc th{background:#1A1A2E!important;color:white!important;font-family:'Barlow Condensed',sans-serif;font-size:12px;font-weight:700;text-align:center;padding:7px 8px}
+.tabla-voc td{font-size:12px;text-align:center;padding:5px 8px;color:#1A1A1A}
+.tabla-voc tr:nth-child(even) td{background:#F8F8F8}
 .alerta-card{background:#fff3f3;border-left:5px solid #D32F2F;border-radius:6px;padding:10px 14px;margin-bottom:8px;font-family:'Barlow Condensed',sans-serif}
 .alerta-card .an{font-size:15px;font-weight:700;color:#1A1A1A}
 .alerta-card .av{font-size:20px;font-weight:900;color:#D32F2F}
 .alerta-card .ag{font-size:12px;color:#888}
+.table-scroll{overflow-x:auto;border-radius:8px}
 div[data-testid="stSelectbox"] label p{font-weight:700!important;font-size:12px!important;color:#1A1A2E!important;text-transform:uppercase;letter-spacing:0.5px}
 </style>
 """, unsafe_allow_html=True)
@@ -316,10 +297,6 @@ def aps_para_filtro(ciudad, dealer, fytd=None):
     df = aplicar_filtro_ciudad(df, ciudad)
     if dealer != "GENERAL": df = df[df["dealer"]==dealer]
     return ["TODOS"] + sorted(df["aps_nombre"].unique())
-
-def aplicar_filtro_ciudad(df, ciudad):
-    if ciudad=="TODAS" or "ciudad" not in df.columns: return df
-    return df[df["ciudad"]==ciudad]
 
 sec = st.session_state.seccion
 perfil = st.session_state.perfil
@@ -383,6 +360,39 @@ else:
 # ==============================================================================
 # SECCIÓN 1: GENERAL
 # ==============================================================================
+
+@st.cache_data(show_spinner=False, max_entries=15)
+def cached_jpg_gen(df, t_type, obj_t, obj_i):
+    if t_type == 'gral':
+        def sty_d(row):
+            s=[""]*len(row)
+            s[list(row.index).index("TRE %")] = color_obj(row["TRE %"], obj_t)
+            s[list(row.index).index("%ISC")]  = color_obj(row["%ISC"], obj_i)
+            for i2, cn in enumerate(row.index):
+                if cn in ("Env.","Comp.","Falta","1-6","7-8"): s[i2] = "color:#555"
+            if row["Nombre"] == "TOTAL GENERAL":
+                for i2 in range(len(s)): 
+                    if s[i2] == "" or s[i2] == "color:#555": s[i2] = "background-color:#E8E8E8;font-weight:bold"
+            return s
+        st2 = df.style.apply(sty_d,axis=1).format({"TRE %":"{:.1%}","%ISC":"{:.1%}","Env.":"{:.0f}","Comp.":"{:.0f}","Falta":"{:.0f}","1-6":"{:.0f}","7-8":"{:.0f}"}).set_table_attributes('class="tabla-voc"').hide(axis="index")
+        return styler_to_jpg_buf(st2).getvalue()
+    elif t_type == 'aps' or t_type == 'topbot':
+        def sty_a(row):
+            s = [""] * len(row)
+            s[list(row.index).index("TRE %")] = color_obj(row["TRE %"], obj_t)
+            s[list(row.index).index("% ISC")] = color_obj(row["% ISC"], obj_i)
+            if t_type == 'aps':
+                for i2, cn in enumerate(row.index):
+                    if cn in ("Enviadas","Completadas","1-6","7-8"): s[i2] = "color:#555"
+                if "Nombre" in row.index and row["Nombre"] == "TOTAL GENERAL":
+                    for i2 in range(len(s)): 
+                        if s[i2] == "" or s[i2] == "color:#555": s[i2] = "background-color:#E8E8E8;font-weight:bold"
+            return s
+        if t_type == 'aps':
+            st_ap = df.style.apply(sty_a, axis=1).format({"TRE %":"{:.1%}","% ISC":"{:.1%}","Enviadas":"{:.0f}","Completadas":"{:.0f}","1-6":"{:.0f}","7-8":"{:.0f}"}).set_table_attributes('class="tabla-voc"').hide(axis='index')
+        else:
+            st_ap = df.style.apply(sty_a, axis=1).format({"TRE %":"{:.1%}","% ISC":"{:.1%}"}).set_table_attributes('class="tabla-voc"').hide(axis="index")
+        return styler_to_jpg_buf(st_ap).getvalue()
 
 def render_general():
     st.markdown("<div class='seccion-titulo'>Medición General — TRE & ISC</div>",unsafe_allow_html=True)
@@ -457,25 +467,23 @@ def render_general():
         ds=df_show[["dealer","E","C","F","prom_tre","i16","i78","prom_isc"]].copy()
         ds.columns=["Nombre","Env.","Comp.","Falta","TRE %","1-6","7-8","%ISC"]
         
-        styled_df = ds.style.apply(style_total_general, axis=1).apply(style_pct_columns(ds, obj_tre, obj_isc, ['TRE %', '%ISC']), axis=1).format({
-            'TRE %': '{:.1%}',
-            '%ISC': '{:.1%}',
-            'Env.': '{:.0f}',
-            'Comp.': '{:.0f}',
-            'Falta': '{:.0f}',
-            '1-6': '{:.0f}',
-            '7-8': '{:.0f}'
-        }).set_properties(**{'text-align': 'center'}).set_table_styles([
-            {'selector': 'th', 'props': [('background-color', '#1A1A2E'), ('color', 'white'), ('font-weight', 'bold'), ('text-align', 'center'), ('padding', '10px')]},
-            {'selector': 'td', 'props': [('padding', '8px'), ('border', '1px solid #E0E0E0')]},
-            {'selector': 'tr:nth-child(even)', 'props': [('background-color', '#F8F8F8')]}
-        ])
+        def sty_d(row):
+            s=[""]*len(row)
+            s[list(row.index).index("TRE %")] = color_obj(row["TRE %"], obj_tre)
+            s[list(row.index).index("%ISC")]  = color_obj(row["%ISC"], obj_isc)
+            for i2, cn in enumerate(row.index):
+                if cn in ("Env.","Comp.","Falta","1-6","7-8"): s[i2] = "color:#555"
+            if row["Nombre"] == "TOTAL GENERAL":
+                for i2 in range(len(s)): 
+                    if s[i2] == "" or s[i2] == "color:#555": s[i2] = "background-color:#E8E8E8;font-weight:bold"
+            return s
+            
+        st2=ds.style.apply(sty_d,axis=1)\
+            .format({"TRE %":"{:.1%}","%ISC":"{:.1%}","Env.":"{:.0f}","Comp.":"{:.0f}","Falta":"{:.0f}","1-6":"{:.0f}","7-8":"{:.0f}"})\
+            .set_table_attributes('class="tabla-voc"').hide(axis="index")
+        st.markdown(tabla_html(st2),unsafe_allow_html=True)
         
-        st.dataframe(styled_df, use_container_width=True, hide_index=True)
-        
-        img_bytes = cached_image_gen(ds, 'gral', obj_tre, obj_isc)
-        if img_bytes:
-            st.download_button("📷 Descargar Tabla General", data=img_bytes, file_name=f"Tabla_General_{CIUDAD}.jpg", mime="image/jpeg", key="dl_gd")
+        st.download_button("Tabla General", data=cached_jpg_gen(ds, 'gral', obj_tre, obj_isc), file_name="Tabla_General.jpg", mime="image/jpeg", key="dl_gd")
         st.markdown("</div>",unsafe_allow_html=True)
 
     with cr:
@@ -497,44 +505,41 @@ def render_general():
             ds_ap = df_af[["aps_nombre","E","C","prom_tre","i16","i78","prom_isc"]].copy()
             ds_ap.columns = ["Nombre","Enviadas","Completadas","TRE %","1-6","7-8","% ISC"]
             
-            styled_ap = ds_ap.style.apply(style_total_general, axis=1).apply(style_pct_columns(ds_ap, obj_tre, obj_isc, ['TRE %', '% ISC']), axis=1).format({
-                'TRE %': '{:.1%}',
-                '% ISC': '{:.1%}',
-                'Enviadas': '{:.0f}',
-                'Completadas': '{:.0f}',
-                '1-6': '{:.0f}',
-                '7-8': '{:.0f}'
-            }).set_properties(**{'text-align': 'center'}).set_table_styles([
-                {'selector': 'th', 'props': [('background-color', '#1A1A2E'), ('color', 'white'), ('font-weight', 'bold'), ('text-align', 'center'), ('padding', '10px')]},
-                {'selector': 'td', 'props': [('padding', '8px'), ('border', '1px solid #E0E0E0')]},
-                {'selector': 'tr:nth-child(even)', 'props': [('background-color', '#F8F8F8')]}
-            ])
+            def sty_a(row):
+                s = [""] * len(row)
+                s[list(row.index).index("TRE %")] = color_obj(row["TRE %"], obj_tre)
+                s[list(row.index).index("% ISC")] = color_obj(row["% ISC"], obj_isc)
+                if row["Nombre"] == "TOTAL GENERAL":
+                    for i2 in range(len(s)): 
+                        if s[i2] == "": s[i2] = "background-color:#E8E8E8;font-weight:bold"
+                return s
             
-            st.dataframe(styled_ap, use_container_width=True, hide_index=True)
+            st_ap = ds_ap.style.apply(sty_a, axis=1).format({"TRE %":"{:.1%}","% ISC":"{:.1%}","Enviadas":"{:.0f}","Completadas":"{:.0f}","1-6":"{:.0f}","7-8":"{:.0f}"}).set_table_attributes('class="tabla-voc"').hide(axis='index')
+            st.markdown(tabla_html(st_ap), unsafe_allow_html=True)
             
-            img_bytes_aps = cached_image_gen(ds_ap, 'aps', obj_tre, obj_isc)
-            if img_bytes_aps:
-                st.download_button("📷 Descargar Tabla APS", data=img_bytes_aps, file_name=f"Tabla_APS_{dealer_sel}.jpg", mime="image/jpeg", key="dl_aps_gen")
+            st.download_button("Descargar Tabla APS", data=cached_jpg_gen(ds_ap, 'aps', obj_tre, obj_isc), file_name="Tabla_APS.jpg", mime="image/jpeg", key="dl_aps_gen")
             
             c_t, c_b = st.columns(2)
             validos = df_ap[df_ap["prom_isc"].notna() & np.isfinite(df_ap["prom_isc"]) & (df_ap["aps_nombre"] != "TOTAL GENERAL")]
             ds_validos = validos[["aps_nombre", "prom_tre", "prom_isc"]].rename(columns={"aps_nombre":"Nombre", "prom_tre":"TRE %", "prom_isc":"% ISC"})
             
-            if not ds_validos.empty:
-                styled_top = ds_validos.nlargest(3,"% ISC").style.apply(style_pct_columns(ds_validos.nlargest(3,"% ISC"), obj_tre, obj_isc, ['TRE %', '% ISC']), axis=1).format({'TRE %': '{:.1%}', '% ISC': '{:.1%}'}).set_properties(**{'text-align': 'center'})
-                styled_bot = ds_validos.nsmallest(3,"% ISC").style.apply(style_pct_columns(ds_validos.nsmallest(3,"% ISC"), obj_tre, obj_isc, ['TRE %', '% ISC']), axis=1).format({'TRE %': '{:.1%}', '% ISC': '{:.1%}'}).set_properties(**{'text-align': 'center'})
-                
-                c_t.dataframe(styled_top, use_container_width=True, hide_index=True)
-                c_b.dataframe(styled_bot, use_container_width=True, hide_index=True)
-                
-                img_top = cached_image_gen(ds_validos.nlargest(3,"% ISC"), 'topbot', obj_tre, obj_isc)
-                img_bot = cached_image_gen(ds_validos.nsmallest(3,"% ISC"), 'topbot', obj_tre, obj_isc)
-                
-                if img_top: c_t.download_button("📷 TOP 3", data=img_top, file_name="Top3.jpg", mime="image/jpeg", key="dl_top3")
-                if img_bot: c_b.download_button("📷 BOTTOM 3", data=img_bot, file_name="Bot3.jpg", mime="image/jpeg", key="dl_bot3")
+            def sty_a_tb(row):
+                s = [""] * len(row)
+                s[list(row.index).index("TRE %")] = color_obj(row["TRE %"], obj_tre)
+                s[list(row.index).index("% ISC")] = color_obj(row["% ISC"], obj_isc)
+                return s
+
+            st_top = ds_validos.nlargest(3,"% ISC").style.apply(sty_a_tb, axis=1).format({"TRE %":"{:.1%}","% ISC":"{:.1%}"}).set_table_attributes('class="tabla-voc"').hide(axis="index")
+            st_bot = ds_validos.nsmallest(3,"% ISC").style.apply(sty_a_tb, axis=1).format({"TRE %":"{:.1%}","% ISC":"{:.1%}"}).set_table_attributes('class="tabla-voc"').hide(axis="index")
+            
+            c_t.download_button("TOP 3", data=cached_jpg_gen(ds_validos.nlargest(3,"% ISC"), 'topbot', obj_tre, obj_isc), file_name="Top3.jpg", mime="image/jpeg", key="dl_top3")
+            c_b.download_button("BOTTOM 3", data=cached_jpg_gen(ds_validos.nsmallest(3,"% ISC"), 'topbot', obj_tre, obj_isc), file_name="Bot3.jpg", mime="image/jpeg", key="dl_bot3")
         else: st.info("Sin datos para el filtro.")
         st.markdown("</div>", unsafe_allow_html=True)
 
+    # =========================================================================
+    # INDICADORES CIRCULARES (Z, AA, AB)
+    # =========================================================================
     st.markdown("<hr style='border: 1px solid rgba(26,26,26,0.1); margin-top: 30px; margin-bottom: 20px;'>", unsafe_allow_html=True)
     st.markdown("<h3 style='text-align:center; color:#1A1A2E; font-family:\"Barlow Condensed\", sans-serif; font-size: 26px; text-transform: uppercase;'>Atributos Especiales</h3>", unsafe_allow_html=True)
     
@@ -596,8 +601,6 @@ def render_general():
 # ==============================================================================
 # SECCIÓN 2: TENDENCIA ISC 
 # ==============================================================================
-
-import matplotlib.patheffects as path_effects
 
 @st.cache_data(show_spinner=False, max_entries=20)
 def cached_plot_tendencia(meses_ord, totales, prom_vals, series_sec, colores_sec, markers_sec, obj_isc, lbl_prom, titulo, lbl_enc):
@@ -750,391 +753,597 @@ def render_tendencia():
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ==============================================================================
+
 # SECCIÓN 3: ATRIBUTOS
+
 # ==============================================================================
 
-@st.cache_data(show_spinner=False, max_entries=20)
-def cached_image_attr_table(df_resumen, cols_eval, obj_vals=None):
-    if df_resumen.empty:
-        return None
-    
-    df_display = df_resumen.copy()
-    
-    pct_cols = [col for col in df_display.columns if col not in ['Atributo', 'GAP']]
-    
-    fig_width = max(10, len(df_display.columns) * 1.2)
-    fig_height = max(3, len(df_display) * 0.5 + 1.5)
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height), facecolor='white')
-    ax.axis('off')
-    
-    formatted_data = []
-    for _, row in df_display.iterrows():
-        formatted_row = []
-        for col in df_display.columns:
-            val = row[col]
-            if col in pct_cols and isinstance(val, (int, float)):
-                formatted_row.append(f"{val:.1%}")
-            elif col == 'GAP' and isinstance(val, (int, float)):
-                formatted_row.append(f"{val:+.1%}")
-            elif isinstance(val, (int, float)):
-                formatted_row.append(f"{val:.2f}" if val > 1 else f"{val:.1%}")
-            else:
-                formatted_row.append(str(val))
-        formatted_data.append(formatted_row)
-    
-    col_labels = df_display.columns.tolist()
-    table = ax.table(
-        cellText=formatted_data,
-        colLabels=col_labels,
-        colColours=['#1A1A2E'] * len(col_labels),
-        loc='center',
-        cellLoc='center',
-        colLoc='center'
-    )
-    
-    table.auto_set_font_size(False)
-    table.set_fontsize(8.5)
-    table.scale(1.2, 1.5)
-    
-    for j in range(len(col_labels)):
-        cell = table[(0, j)]
-        cell.set_text_props(color='white', fontweight='bold')
-        cell.set_facecolor('#1A1A2E')
-        cell.set_edgecolor('#1A1A2E')
-        cell.set_linewidth(1)
-    
-    for i in range(len(df_display)):
-        for j in range(len(df_display.columns)):
-            cell = table[(i + 1, j)]
-            
-            if i % 2 == 0:
-                cell.set_facecolor('#F8F8F8')
-            else:
-                cell.set_facecolor('white')
-            cell.set_edgecolor('#E0E0E0')
-            cell.set_linewidth(0.5)
-            
-            if col_labels[j] == 'Atributo':
-                cell.set_facecolor('#A6A6A6')
-                cell.set_text_props(color='black', fontweight='bold')
-            
-            if col_labels[j] == 'GAP':
-                try:
-                    val = df_display.iloc[i, j]
-                    if isinstance(val, (int, float)):
-                        if val < 0:
-                            cell.set_text_props(color='#D32F2F', fontweight='bold')
-                        else:
-                            cell.set_text_props(color='#388E3C', fontweight='bold')
-                except:
-                    pass
-            
-            if col_labels[j] in cols_eval and obj_vals and 'Objetivo' in df_display.columns:
-                try:
-                    val = df_display.iloc[i, j]
-                    obj = df_display.iloc[i, df_display.columns.get_loc('Objetivo')]
-                    if isinstance(val, (int, float)) and isinstance(obj, (int, float)):
-                        if val >= obj:
-                            cell.set_facecolor('#CCFFCC')
-                            cell.set_text_props(fontweight='bold')
-                        else:
-                            cell.set_facecolor('#FFCCCC')
-                except:
-                    pass
-    
-    plt.tight_layout()
-    buf = io.BytesIO()
-    fig.savefig(buf, format='jpeg', facecolor='white', bbox_inches='tight', dpi=150)
-    plt.close(fig)
-    buf.seek(0)
-    return buf.getvalue()
+import matplotlib.patheffects as path_effects
 
 @st.cache_data(show_spinner=False, max_entries=20)
+
+def cached_jpg_attr_table(df_resumen, cols_eval):
+
+    def sty_attr_c(row):
+
+        s = [""] * len(row)
+
+        for i2, cn in enumerate(row.index):
+
+            if cn == "GAP": s[i2] = "color:#D32F2F;font-weight:700" if (pd.notna(row[cn]) and row[cn]<0) else "color:#388E3C;font-weight:700"
+
+            elif cn in cols_eval: s[i2] = color_obj(row[cn], row.get("Objetivo", np.nan))
+
+        return s
+
+    fmt_dict = {'Objetivo': '{:.1%}', 'GAP': '{:+.1%}'}
+
+    for c in cols_eval: fmt_dict[c] = '{:.1%}'
+
+    styler_res = df_resumen.style.apply(sty_attr_c, axis=1).format(fmt_dict, na_rep="—").set_table_attributes('class="tabla-voc"').hide(axis="index")
+
+    styler_res.map(lambda v: 'background-color: #A6A6A6; color: black;', subset=['Atributo'])
+
+    return styler_to_jpg_buf(styler_res).getvalue()
+
+
+@st.cache_data(show_spinner=False, max_entries=20)
+
 def cached_hist_plot_attr(datos_hist_tabla, color_map, meses_h, obj_h, atr_hist_sel, dealer_sel, aps_sel):
+
     fig_h, ax_h = plt.subplots(figsize=(13, 7.5), facecolor="white")
+
     x_h = np.arange(len(meses_h))
+
     efecto = [path_effects.withStroke(linewidth=2.5, foreground="white", alpha=0.9)]
 
     for nombre, y_vals in datos_hist_tabla.items():
+
         if nombre == "TOTAL GENERAL" or nombre.startswith("TOTAL "):
+
             c = color_map.get(nombre, "#000000") 
+
             ax_h.plot(x_h, y_vals, color=c, linewidth=4, marker='D', markersize=8, zorder=6)
+
             for j, v in enumerate(y_vals):
+
                 if pd.notna(v): ax_h.text(j, v + 0.035, f"{v:.1%}", ha='center', fontsize=10, fontweight='900', color=c, path_effects=efecto, zorder=7)
+
         else:
+
             c = color_map.get(nombre, "#1976D2")
+
             if aps_sel != "TODOS" and dealer_sel != "GENERAL":
+
                 ax_h.plot(x_h, y_vals, color=c, linewidth=3, marker='o', markersize=9, zorder=3)
+
                 for j, v in enumerate(y_vals):
+
                     if pd.notna(v): ax_h.text(j, v + 0.035, f"{v:.1%}", ha='center', fontsize=9.5, fontweight='bold', color=c, path_effects=efecto, zorder=5)
+
             else:
+
                 ax_h.scatter(x_h, y_vals, color=c, s=90, zorder=4, alpha=0.9, edgecolors="white")
+
                 for j, v in enumerate(y_vals):
+
                     if pd.notna(v): ax_h.text(j, v - 0.035, f"{v:.1%}", ha='center', fontsize=8, color=c, fontweight='bold', path_effects=efecto, zorder=5)
 
+
+
     ax_h.axhline(obj_h, color=COLOR_OBJETIVO, linestyle="--", linewidth=2, zorder=1)
-    ax_h.set_xticks(x_h)
-    ax_h.set_xticklabels([]) 
-    ax_h.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
     
+
+    ax_h.set_xticks(x_h)
+
+    ax_h.set_xticklabels([]) 
+
+    ax_h.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
+
+    
+
     all_vals = []
+
     for vals in datos_hist_tabla.values(): all_vals.extend([v for v in vals if pd.notna(v)])
+
     min_y = max(0, min(all_vals + [obj_h]) - 0.15) if all_vals else 0
+
     ax_h.set_ylim(min_y, 1.15)
+
     ax_h.set_title(f"Tendencia FYTD: {atr_hist_sel}\n({dealer_sel} / {aps_sel})", fontsize=13, fontweight='bold', pad=15)
 
+
     row_labels_raw = list(datos_hist_tabla.keys()) + ["Meta"]
+
     row_labels = [f"■  {k}" for k in row_labels_raw]
+
     cell_text = [[f"{v:.1%}" if pd.notna(v) else "—" for v in vals] for vals in datos_hist_tabla.values()] + [[f"{obj_h:.0%}"] * len(meses_h)]
     
+
     margen_dinamico = 0.12 + (len(row_labels) * 0.045)
+
     plt.subplots_adjust(bottom=margen_dinamico)
+
     
+
     tbl = ax_h.table(cellText=cell_text, rowLabels=row_labels, colLabels=meses_h, loc='bottom', cellLoc='center')
+
     tbl.auto_set_font_size(False); tbl.set_fontsize(8.5); tbl.scale(1, 1.8)
+
     
+
     for (r, c), cell in tbl.get_celld().items():
+
         if r == 0: 
+
             cell.set_facecolor("#1A1A2E"); cell.get_text().set_color("white"); cell.get_text().set_weight("bold")
+
         elif c == -1: 
+
             lbl_raw = row_labels_raw[r-1]
+
             cell.get_text().set_weight("bold")
+
             if lbl_raw in color_map: cell.get_text().set_color(color_map[lbl_raw])
+
             if "TOTAL" in str(lbl_raw): cell.set_facecolor("#E8E8E8")
+
             if "Meta" in str(lbl_raw): cell.set_facecolor("#FFF3E0")
 
     buf = io.BytesIO()
+
     fig_h.savefig(buf, format="jpeg", facecolor="white", bbox_inches="tight", dpi=150)
+
     plt.close(fig_h)
+
     buf.seek(0)
+
     return buf.getvalue()
 
+
 def render_atributos():
+
     st.markdown("<div class='seccion-titulo'>📋 Resumen de Atributos</div>",unsafe_allow_html=True)
 
     c1,c2,c3,c4,c5,c6 = st.columns([1.5, 1.5, 1.5, 1.5, 1, 1])
+
     with c1: fytd_sel=st.selectbox("Periodo:",todos_fytd,key="a_fytd")
+
     with c2:
+
         meses_a=meses_de(D["atributos"],fytd_sel,CIUDAD)
+
         mes_sel=st.selectbox("Mes/Año:", ["TODOS"] + meses_a if meses_a else ["TODOS"], key="a_mes")
+
     with c3: dealer_sel=st.selectbox("Dealer:",dealers_para_ciudad(CIUDAD),key="a_dlr")
+
     with c4:
+
         aps_opts=aps_para_filtro(CIUDAD,dealer_sel,fytd_sel)
+
         aps_sel=st.selectbox("APS:",aps_opts,key="a_aps")
+
         
+
     if "atr_acum" not in st.session_state: st.session_state.atr_acum = False
+
     with c5:
+
         st.markdown("<div style='margin-top:28px'></div>",unsafe_allow_html=True)
+
         if st.button("Cargar",key="a_btn",use_container_width=True,type="primary"):
+
             st.session_state.atr_acum = False; st.rerun()
+
     with c6:
+
         st.markdown("<div style='margin-top:28px'></div>",unsafe_allow_html=True)
+
         if st.button("ACUM",key="a_btn_acum",use_container_width=True):
+
             st.session_state.atr_acum = True; st.rerun()
+
+
 
     if D["atributos"].empty or (mes_sel=="TODOS" and not meses_a): st.info("Sin datos."); return
 
+
+
     usar_aps_nivel=(aps_sel!="TODOS")
 
+
     df_all_city = aplicar_filtro_ciudad(D["atributos"], CIUDAD)
+
     if df_all_city.empty: st.warning("Sin datos."); return    
+
     df_all_city = df_all_city.sort_values("orden_mes")
+
     todos_meses_cron = df_all_city.drop_duplicates("mes_anio")["mes_anio"].tolist()
+
     meses_cron_fytd = meses_de(D["atributos"], fytd_sel, CIUDAD)
 
+
     if mes_sel == 'TODOS':
+
         meses_act_eval = meses_cron_fytd
+
         meses_prev_eval = []
+
     elif st.session_state.atr_acum:
+
         if mes_sel in meses_cron_fytd:
+
             idx = meses_cron_fytd.index(mes_sel)
+
             meses_act_eval = meses_cron_fytd[:idx+1]
+
         else:
+
             meses_act_eval = []
+
         meses_prev_eval = []
+
     else:
+
         meses_act_eval = [mes_sel]
+
         idx_actual = todos_meses_cron.index(mes_sel) if mes_sel in todos_meses_cron else -1
+
         meses_prev_eval = [todos_meses_cron[idx_actual - 1]] if idx_actual > 0 else []
 
+
+
     if usar_aps_nivel:
+
         df_act = filtrar(D["atrib_aps"], fytd=None, ciudad=CIUDAD, dealer=dealer_sel if dealer_sel!="GENERAL" else None, aps=aps_sel)
+
     else:
+
         df_act = filtrar(D["atributos"] if dealer_sel == "GENERAL" else D["atrib_aps"], fytd=None, ciudad=CIUDAD, dealer=dealer_sel if dealer_sel!="GENERAL" else None)
 
+
+
     df_act = df_act[~df_act["dealer"].astype(str).str.upper().str.contains("SIN DEALER", na=False)]
+
     if "aps_nombre" in df_act.columns:
+
         df_act = df_act[~df_act["aps_nombre"].astype(str).str.upper().str.contains("SIN ASESOR", na=False)]
+
+
 
     if df_act.empty: st.warning("Sin datos para la selección."); return
 
+
+
     score_col="pct_score" if "pct_score" in df_act.columns else "pct_top2box"
+
     obj_col = "obj_atributo"
 
+
+
     def calc_atr_vals(meses_filtro, df_fuente):
+
         df_proc = df_fuente[df_fuente["mes_anio"].isin(meses_filtro)]
+
         if df_proc.empty: return {}
+
         res = {}
+
         for attr, g in df_proc.groupby("atributo"):
+
             if "n_respuestas" in g.columns and g["n_respuestas"].sum() > 0:
+
                 res[attr] = (g[score_col]*g["n_respuestas"]).sum()/g["n_respuestas"].sum()
+
             else:
+
                 res[attr] = g[score_col].mean()
+
         return res
 
+
+
     vals_act_main = calc_atr_vals(meses_act_eval, df_act)
+
     vals_prev_main = calc_atr_vals(meses_prev_eval, df_act)
+
     df_act_current = df_act[df_act["mes_anio"].isin(meses_act_eval)]
+
 
     st.markdown("<div class='chart-box'>",unsafe_allow_html=True)
 
+
     if not usar_aps_nivel and dealer_sel == "GENERAL":
+
         dealers_en_datos = sorted([d for d in df_act_current["dealer"].unique() if d != "SIN DEALER"])
+
         vals_dealers = {d: calc_atr_vals(meses_act_eval, df_act[df_act["dealer"] == d]) for d in dealers_en_datos}
+
         data_tbl = []
+
         todos_atributos = sorted([a for a in set(vals_act_main.keys()).union(set(vals_prev_main.keys())) if "bien a la primera h1" not in a.lower()])
+
         for a in todos_atributos:
+
             row = {'Atributo': a}
+
             for d in dealers_en_datos: row[d] = vals_dealers[d].get(a, np.nan)
+
             val_gen = vals_act_main.get(a, np.nan); val_prev = vals_prev_main.get(a, np.nan)
+
             row['GENERAL'] = val_gen; row['GAP'] = val_gen - val_prev if pd.notna(val_gen) and pd.notna(val_prev) else np.nan
+
             obj_raw = df_act_current[df_act_current['atributo'] == a][obj_col].mean()
+
             row['Objetivo'] = obj_raw / 100.0 if pd.notna(obj_raw) and obj_raw > 2 else obj_raw
+
             data_tbl.append(row)
+
         df_resumen = pd.DataFrame(data_tbl)
+
         if not df_resumen.empty:
+
             df_resumen = df_resumen.sort_values(by='GENERAL', ascending=True).reset_index(drop=True)
+
             cols_orden = ['Atributo'] + dealers_en_datos + ['GENERAL', 'Objetivo', 'GAP']
+
             df_resumen = df_resumen[[c for c in cols_orden if c in df_resumen.columns]]
+
+        fmt_dict = {'GENERAL': '{:.1%}', 'Objetivo': '{:.1%}', 'GAP': '{:+.1%}'}
+
+        for d in dealers_en_datos: fmt_dict[d] = '{:.1%}'
+
         cols_cache = tuple(dealers_en_datos + ["GENERAL"])
-        
-        styled_attr = df_resumen.style.apply(lambda x: ['background-color: #A6A6A6; color: black; font-weight: bold;' if c == 'Atributo' else (color_obj(x['GENERAL'], x['Objetivo']) if c == 'GENERAL' else (color_obj(x[d], x['Objetivo']) if c in dealers_en_datos else ('color: #D32F2F; font-weight: bold;' if c == 'GAP' and x['GAP'] < 0 else ('color: #388E3C; font-weight: bold;' if c == 'GAP' and x['GAP'] > 0 else '')))) for c in df_resumen.columns], axis=1).format({col: '{:.1%}' for col in df_resumen.columns if col not in ['Atributo', 'GAP']}, {'GAP': '{:+.1%}'})
-        
+
+        styler_res = df_resumen.style.apply(lambda row: ["color:#D32F2F;font-weight:700" if c == "GAP" and (pd.notna(row[c]) and row[c]<0) else ("color:#388E3C;font-weight:700" if c == "GAP" else (color_obj(row[c], row.get("Objetivo", np.nan)) if c in dealers_en_datos + ["GENERAL"] else "")) for c in row.index], axis=1).format(fmt_dict, na_rep="—").set_table_attributes('class="tabla-voc"').hide(axis="index")
+
+
+
     elif not usar_aps_nivel and dealer_sel != "GENERAL":
+
         aps_en_datos = sorted([a for a in df_act_current["aps_nombre"].unique() if a != "SIN ASESOR"])
+
         vals_aps = {a: calc_atr_vals(meses_act_eval, df_act[df_act["aps_nombre"] == a]) for a in aps_en_datos}
+
         data_tbl = []
+
         todos_atributos = sorted([a for a in set(vals_act_main.keys()).union(set(vals_prev_main.keys())) if "bien a la primera h1" not in a.lower()])
+
         for a in todos_atributos:
+
             row = {'Atributo': a}
+
             for aps in aps_en_datos: row[aps] = vals_aps[aps].get(a, np.nan)
+
             val_gen = vals_act_main.get(a, np.nan); val_prev = vals_prev_main.get(a, np.nan)
+
             row['GENERAL'] = val_gen; row['GAP'] = val_gen - val_prev if pd.notna(val_gen) and pd.notna(val_prev) else np.nan
+
             obj_raw = df_act_current[df_act_current['atributo'] == a][obj_col].mean()
+
             row['Objetivo'] = obj_raw / 100.0 if pd.notna(obj_raw) and obj_raw > 2 else obj_raw
+
             data_tbl.append(row)
+
         df_resumen = pd.DataFrame(data_tbl)
+
         if not df_resumen.empty:
+
             df_resumen = df_resumen.sort_values(by='GENERAL', ascending=True).reset_index(drop=True)
+
             cols_orden = ['Atributo'] + aps_en_datos + ['GENERAL', 'Objetivo', 'GAP']
+
             df_resumen = df_resumen[[c for c in cols_orden if c in df_resumen.columns]]
+
+        fmt_dict = {'GENERAL': '{:.1%}', 'Objetivo': '{:.1%}', 'GAP': '{:+.1%}'}
+
+        for aps in aps_en_datos: fmt_dict[aps] = '{:.1%}'
+
         cols_cache = tuple(aps_en_datos + ["GENERAL"])
-        
-        styled_attr = df_resumen.style.apply(lambda x: ['background-color: #A6A6A6; color: black; font-weight: bold;' if c == 'Atributo' else (color_obj(x['GENERAL'], x['Objetivo']) if c == 'GENERAL' else (color_obj(x[aps], x['Objetivo']) if c in aps_en_datos else ('color: #D32F2F; font-weight: bold;' if c == 'GAP' and x['GAP'] < 0 else ('color: #388E3C; font-weight: bold;' if c == 'GAP' and x['GAP'] > 0 else '')))) for c in df_resumen.columns], axis=1).format({col: '{:.1%}' for col in df_resumen.columns if col not in ['Atributo', 'GAP']}, {'GAP': '{:+.1%}'})
-        
+
+        styler_res = df_resumen.style.apply(lambda row: ["color:#D32F2F;font-weight:700" if c == "GAP" and (pd.notna(row[c]) and row[c]<0) else ("color:#388E3C;font-weight:700" if c == "GAP" else (color_obj(row[c], row.get("Objetivo", np.nan)) if c in aps_en_datos + ["GENERAL"] else "")) for c in row.index], axis=1).format(fmt_dict, na_rep="—").set_table_attributes('class="tabla-voc"').hide(axis="index")
+
+
+
     else:
+
         data_tbl = []
+
         todos_atributos = sorted([a for a in set(vals_act_main.keys()).union(set(vals_prev_main.keys())) if "bien a la primera h1" not in a.lower()])
+
         for a in todos_atributos:
+
             val_a = vals_act_main.get(a, np.nan); val_p = vals_prev_main.get(a, np.nan)
+
             obj_raw = df_act_current[df_act_current['atributo'] == a][obj_col].mean()
+
             obj_v = obj_raw / 100.0 if pd.notna(obj_raw) and obj_raw > 2 else obj_raw
+
             data_tbl.append({'Atributo': a, '%': val_a, 'Objetivo': obj_v, 'GAP': val_a - val_p if pd.notna(val_a) and pd.notna(val_p) else np.nan})
+
         df_resumen = pd.DataFrame(data_tbl)
+
         if not df_resumen.empty:
+
             df_resumen = df_resumen.sort_values(by='%', ascending=True).reset_index(drop=True)
+
             df_resumen = df_resumen[['Atributo', '%', 'Objetivo', 'GAP']]
+
         cols_cache = tuple(["%"])
-        
-        styled_attr = df_resumen.style.apply(lambda x: ['background-color: #A6A6A6; color: black; font-weight: bold;' if c == 'Atributo' else (color_obj(x['%'], x['Objetivo']) if c == '%' else ('color: #D32F2F; font-weight: bold;' if c == 'GAP' and x['GAP'] < 0 else ('color: #388E3C; font-weight: bold;' if c == 'GAP' and x['GAP'] > 0 else ''))) for c in df_resumen.columns], axis=1).format({'%': '{:.1%}', 'Objetivo': '{:.1%}', 'GAP': '{:+.1%}'})
 
-    styled_attr = styled_attr.set_properties(**{'text-align': 'center'}).set_table_styles([
-        {'selector': 'th', 'props': [('background-color', '#1A1A2E'), ('color', 'white'), ('font-weight', 'bold'), ('text-align', 'center'), ('padding', '10px')]},
-        {'selector': 'td', 'props': [('padding', '8px'), ('border', '1px solid #E0E0E0')]},
-        {'selector': 'tr:nth-child(even)', 'props': [('background-color', '#F8F8F8')]}
-    ])
-    
-    st.dataframe(styled_attr, use_container_width=True, hide_index=True)
-    
-    img_bytes = cached_image_attr_table(df_resumen, cols_cache)
-    if img_bytes:
-        st.download_button("📷 Descargar Tabla Atributos", data=img_bytes, file_name="Atributos.jpg", mime="image/jpeg", key="dl_attr")
+        styler_res = df_resumen.style.apply(lambda row: ["color:#D32F2F;font-weight:700" if c == "GAP" and (pd.notna(row[c]) and row[c]<0) else ("color:#388E3C;font-weight:700" if c == "GAP" else (color_obj(row[c], row.get("Objetivo", np.nan)) if c == "%" else "")) for c in row.index], axis=1).format({'%': '{:.1%}', 'Objetivo': '{:.1%}', 'GAP': '{:+.1%}'}, na_rep="—").set_table_attributes('class="tabla-voc"').hide(axis="index")
 
-    col_eval = 'GENERAL' if not usar_aps_nivel else '%'
-    if not df_resumen.empty:
-        st.markdown("<div style='margin-top:20px; margin-bottom:15px; font-weight:900; color:#1A1A2E; font-size:22px;'>Atributos en Alerta</div>", unsafe_allow_html=True)
-        alertas = df_resumen[df_resumen[col_eval] < df_resumen['Objetivo']]
-        if alertas.empty: st.success("✅ Todo sobre el objetivo.")
+
+
+    styler_res.map(lambda v: 'background-color: #A6A6A6; color: black;', subset=['Atributo'])
+
+
+
+    col_rs_izq, col_rs_esp, col_rs_der = st.columns([1.4, 0.2, 1.4])
+
+    with col_rs_izq: 
+
+        st.markdown(tabla_html(styler_res), unsafe_allow_html=True)
+
+        st.download_button("📥 Descargar Tabla", data=cached_jpg_attr_table(df_resumen, cols_cache), file_name="Atributos.jpg", mime="image/jpeg", key="dl_attr")
+
+
+    with col_rs_der:
+
+        st.markdown("<div style='margin-bottom:15px; font-weight:900; color:#1A1A1A; font-size:22px;'>Atributos en Alerta</div>", unsafe_allow_html=True)
+
+        col_eval = 'GENERAL' if not usar_aps_nivel else '%'
+
+        if df_resumen.empty: st.info("Sin datos.")
+
         else:
-            for index, row in alertas.iterrows():
-                atr_n = row['Atributo']; gap_val = row['GAP']; obj_req = row['Objetivo']
-                gap_str = "N/A" if pd.isna(gap_val) else (f"📉 {gap_val:+.1%}" if gap_val < 0 else f"📈 {gap_val:+.1%}")
-                st.markdown(f"<div style='background:rgba(211,47,47,0.1); border-left:5px solid #D32F2F; padding:10px; margin-bottom:10px;'><span style='color: black;'><b>{atr_n}</b> (Meta: {obj_req:.0%})</span><br><span style='color:#D32F2F; font-size:18px; font-weight:900;'>{row[col_eval]:.1%}</span> <small style='color:#555;'>GAP: {gap_str}</small></div>", unsafe_allow_html=True)
+
+            alertas = df_resumen[df_resumen[col_eval] < df_resumen['Objetivo']]
+
+            if alertas.empty: st.success("✅ Todo sobre el objetivo.")
+
+            else:
+
+                for index, row in alertas.iterrows():
+
+                    atr_n = row['Atributo']; gap_val = row['GAP']; obj_req = row['Objetivo']
+
+                    gap_str = "N/A" if pd.isna(gap_val) else (f"📉 {gap_val:+.1%}" if gap_val < 0 else f"📈 {gap_val:+.1%}")
+
+                    st.markdown(f"<div style='background:rgba(211,47,47,0.1); border-left:5px solid #D32F2F; padding:10px; margin-bottom:10px;'><span style='color: black;'><b>{atr_n}</b> (Meta: {obj_req:.0%})</span><br><span style='color:#D32F2F; font-size:18px; font-weight:900;'>{row[col_eval]:.1%}</span> <small style='color:#555;'>GAP: {gap_str}</small></div>", unsafe_allow_html=True)
 
     st.markdown("</div>",unsafe_allow_html=True)
 
+
+    # =========================================================================
+
+    # ANÁLISIS HISTÓRICO: GRÁFICA + TABLA LEYENDA
+
+    # =========================================================================
+
     st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
+
     st.markdown("<div class='seccion-titulo'>📊 Análisis Histórico de Atributos</div>", unsafe_allow_html=True)
 
+
     df_h_base = aplicar_filtro_ciudad(D["atributos"], CIUDAD)
+
     df_h_base = df_h_base[df_h_base["fytd"] == fytd_sel]
+
     df_h_aps = aplicar_filtro_ciudad(D["atrib_aps"], CIUDAD)
+
     if not df_h_aps.empty: df_h_aps = df_h_aps[df_h_aps["fytd"] == fytd_sel]
 
+
+
     lista_atr_hist = sorted([a for a in df_h_base["atributo"].unique() if "bien a la primera h1" not in a.lower()])
+
     if not lista_atr_hist: return
+
     atr_hist_sel = st.selectbox("Selecciona un Atributo:", lista_atr_hist, key="h_atr_sel")
+
     meses_h = meses_de(D["atributos"], fytd_sel, CIUDAD)
+
     
+
     df_h_b_sel = df_h_base[df_h_base["atributo"] == atr_hist_sel]
+
     df_h_a_sel = df_h_aps[df_h_aps["atributo"] == atr_hist_sel] if not df_h_aps.empty else pd.DataFrame()
 
+
+
     def get_trend(df_sub):
+
         vals = []
+
         for m in meses_h:
+
             g = df_sub[df_sub["mes_anio"] == m]
+
             if g.empty: vals.append(np.nan)
+
             else:
+
                 if "n_respuestas" in g.columns and g["n_respuestas"].sum() > 0:
+
                     vals.append((g[score_col]*g["n_respuestas"]).sum()/g["n_respuestas"].sum())
+
                 else: vals.append(g[score_col].mean())
+
         return vals
 
+
+
     datos_hist_tabla = {}
+
     color_map = {}
+
     obj_h_raw = df_h_b_sel[obj_col].iloc[0] if not df_h_b_sel.empty else 0.85
+
     obj_h = obj_h_raw / 100.0 if obj_h_raw > 2 else obj_h_raw
+
     PALETA = ["#1976D2", "#D32F2F", "#388E3C", "#9C27B0", "#FF9800", "#00BCD4", "#E91E63", "#795548", "#607D8B"]
 
+
+
     if dealer_sel == "GENERAL":
+
         datos_hist_tabla["TOTAL GENERAL"] = get_trend(df_h_b_sel)
+
         color_map["TOTAL GENERAL"] = "#000000"
+
         for i, d in enumerate(sorted(df_h_b_sel["dealer"].unique())):
+
             datos_hist_tabla[d] = get_trend(df_h_b_sel[df_h_b_sel["dealer"] == d])
+
             color_map[d] = PALETA[i % len(PALETA)]
+
+                
+
     elif dealer_sel != "GENERAL" and aps_sel == "TODOS":
+
         datos_hist_tabla[f"TOTAL {dealer_sel}"] = get_trend(df_h_b_sel[df_h_b_sel["dealer"] == dealer_sel])
+
         color_map[f"TOTAL {dealer_sel}"] = "#000000"
+
         aps_list = sorted(df_h_a_sel[df_h_a_sel["dealer"] == dealer_sel]["aps_nombre"].unique())
+
         for i, a in enumerate(aps_list):
+
             datos_hist_tabla[a] = get_trend(df_h_a_sel[(df_h_a_sel["dealer"] == dealer_sel) & (df_h_a_sel["aps_nombre"] == a)])
+
             color_map[a] = PALETA[i % len(PALETA)]
+
     else:
+
         datos_hist_tabla[aps_sel] = get_trend(df_h_a_sel[(df_h_a_sel["dealer"] == dealer_sel) & (df_h_a_sel["aps_nombre"] == aps_sel)])
+
         color_map[aps_sel] = "#1976D2"
+
+
 
     color_map["Meta"] = COLOR_OBJETIVO
 
+
+
     img_bytes = cached_hist_plot_attr(datos_hist_tabla, color_map, meses_h, obj_h, atr_hist_sel, dealer_sel, aps_sel)
+
     
+
     st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
+
     st.image(img_bytes, use_container_width=True)
-    st.download_button("📷 Descargar Gráfica Completa", data=img_bytes, file_name=f"Tendencia_{atr_hist_sel}.jpg", mime="image/jpeg", key="dl_hist_full")
+
+    st.download_button("📥 Descargar Gráfica Completa", data=img_bytes, file_name=f"Tendencia_{atr_hist_sel}.jpg", mime="image/jpeg", key="dl_hist_full")
+
     st.markdown("</div>", unsafe_allow_html=True)
+
 
 # ==============================================================================
 # SECCIÓN 4: RADIAL
 # ==============================================================================
+
+import matplotlib.patheffects as path_effects
 
 def render_radial():
     st.markdown("<div class='seccion-titulo'>Comparativo Radial de Talleres</div>",unsafe_allow_html=True)
@@ -1228,13 +1437,13 @@ def render_radial():
     for i,(angle,attr) in enumerate(zip(angles[:-1],attrs_disponibles)):
         val_g=gral.get(attr,0); ha="left" if angle<np.pi else "right"
         if abs(angle-np.pi/2)<0.1 or abs(angle-3*np.pi/2)<0.1: ha="center"
-        ax.text(angle,1.25,f"{textwrap.fill(attr,14)}\n{val_g:.1%}", ha=ha,va="center",fontsize=8,color="#1A1A1E",fontweight="bold",linespacing=1.3)
+        ax.text(angle,1.25,f"{textwrap.fill(attr,14)}\n{val_g:.1%}", ha=ha,va="center",fontsize=8,color="#1A1A1A",fontweight="bold",linespacing=1.3)
 
     ax.set_xticks([]); ax.set_yticks([0.2,0.4,0.6,0.8,1.0]); ax.set_yticklabels(["20%","40%","60%","80%","100%"],fontsize=7,color="#888")
     ax.set_ylim(0,1.25); ax.spines["polar"].set_color("#DDD"); ax.grid(color="#DDD",linewidth=0.7)
     
     str_acum = " (ACUM)" if st.session_state.rad_acum and mes_sel != "TODOS" else ""
-    ax.set_title(f"Comparativo Radial ({mes_sel}{str_acum}){f' — {dealer_sel}' if dealer_sel!='GENERAL' else ''}",fontsize=16,fontweight="bold",pad=40,color="#1A1A1E")
+    ax.set_title(f"Comparativo Radial ({mes_sel}{str_acum}){f' — {dealer_sel}' if dealer_sel!='GENERAL' else ''}",fontsize=16,fontweight="bold",pad=40,color="#1A1A1A")
     
     ax.legend(loc="lower center",bbox_to_anchor=(0.5,-0.15),fontsize=9,frameon=True,facecolor="white",edgecolor="#CCC", ncol=3)
 
@@ -1248,76 +1457,12 @@ def render_radial():
 # ==============================================================================
 
 @st.cache_data(show_spinner=False, max_entries=10)
-def cached_image_pendientes(df, table_type):
-    if df.empty:
-        return None
-    
-    fig_width = max(12, len(df.columns) * 1.5)
-    fig_height = max(3, len(df) * 0.4 + 1.5)
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height), facecolor='white')
-    ax.axis('off')
-    
-    formatted_data = df.values.astype(str)
-    col_labels = df.columns.tolist()
-    
-    table = ax.table(
-        cellText=formatted_data,
-        colLabels=col_labels,
-        colColours=['#1A1A2E'] * len(col_labels),
-        loc='center',
-        cellLoc='center',
-        colLoc='center'
-    )
-    
-    table.auto_set_font_size(False)
-    table.set_fontsize(8)
-    table.scale(1.2, 1.4)
-    
-    for j in range(len(col_labels)):
-        cell = table[(0, j)]
-        cell.set_text_props(color='white', fontweight='bold')
-        cell.set_facecolor('#1A1A2E')
-        cell.set_edgecolor('#1A1A2E')
-        cell.set_linewidth(1)
-    
-    for i in range(len(df)):
-        for j in range(len(df.columns)):
-            cell = table[(i + 1, j)]
-            
-            if i % 2 == 0:
-                cell.set_facecolor('#F8F8F8')
-            else:
-                cell.set_facecolor('white')
-            cell.set_edgecolor('#E0E0E0')
-            cell.set_linewidth(0.5)
-            
-            if table_type == 'pendientes' and col_labels[j] == 'Estado':
-                estado = df.iloc[i, j]
-                if estado == 'Expirado':
-                    cell.set_text_props(color='#D32F2F', fontweight='bold')
-                elif estado == 'Contacto en uso':
-                    cell.set_text_props(color='#FF8C00', fontweight='bold')
-            
-            if table_type == 'resumen' and col_labels[j] == 'Vencidas':
-                try:
-                    val = float(df.iloc[i, j])
-                    if val > 0:
-                        cell.set_facecolor('#FFCCCC')
-                except:
-                    pass
-            
-            if 'Asesor' in col_labels and i < len(df) and table_type == 'resumen':
-                asesor = df.iloc[i, 0]
-                if asesor == 'TOTAL GENERAL':
-                    cell.set_facecolor('#E8E8E8')
-                    cell.set_text_props(fontweight='bold')
-    
-    plt.tight_layout()
-    buf = io.BytesIO()
-    fig.savefig(buf, format='jpeg', facecolor='white', bbox_inches='tight', dpi=150)
-    plt.close(fig)
-    buf.seek(0)
-    return buf.getvalue()
+def cached_jpg_export(df, table_type):
+    if table_type == 'pendientes':
+        styler = df.style.apply(lambda row: ["color:#D32F2F;font-weight:bold" if c == "Estado" and row["Estado"] == "Expirado" else ("color:#FF8C00;font-weight:bold" if c == "Estado" and row["Estado"] == "Contacto en uso" else "") for c in row.index], axis=1).set_table_attributes('class="tabla-voc"').hide(axis="index")
+    elif table_type == 'resumen':
+        styler = df.style.apply(lambda row: ["background-color:#ffcccc;color:black;font-weight:bold" if c == "Vencidas" and row["Vencidas"] > 0 else ("background-color:#E8E8E8;font-weight:bold" if row["Asesor"] == "TOTAL GENERAL" else "") for c in row.index], axis=1).format({"Total Enviadas":"{:.0f}", "Completadas":"{:.0f}", "Vencidas":"{:.0f}", "Pendientes":"{:.0f}"}).set_table_attributes('class="tabla-voc"').hide(axis="index")
+    return styler_to_jpg_buf(styler).getvalue()
 
 @st.cache_data(show_spinner=False)
 def procesar_fechas_pendientes(df_raw, ciudad):
@@ -1350,6 +1495,9 @@ def render_pendientes():
 
     if "filtro_estado_p" not in st.session_state: st.session_state.filtro_estado_p = "TODOS"
 
+    # =========================================================================
+    # EXTRACCIÓN DE TOTALES MAESTROS
+    # =========================================================================
     df_tre = aplicar_filtro_ciudad(D["tre_aps"].copy(), CIUDAD)
     if not df_tre.empty:
         df_tre = df_tre[df_tre["fytd"] == fytd_p]
@@ -1363,6 +1511,9 @@ def render_pendientes():
         tot_env = 0
         tot_comp = 0
 
+    # =========================================================================
+    # LÓGICA DE CADUCIDAD ROBUSTA
+    # =========================================================================
     hoy = pd.Timestamp.today().normalize()
     
     df_f['status_calc'] = df_f['status']
@@ -1386,6 +1537,7 @@ def render_pendientes():
 
     df_mostrar = df_f[df_f["status_calc"] == st.session_state.filtro_estado_p] if st.session_state.filtro_estado_p != "TODOS" else df_f.copy()
 
+    # --- TABLA 1: DETALLE DE PENDIENTES ---
     st.markdown("<div class='chart-box'>",unsafe_allow_html=True)
     titulo_estado = "" if st.session_state.filtro_estado_p == 'TODOS' else f" ({st.session_state.filtro_estado_p.upper()})"
     st.markdown(f"**DETALLE DE PENDIENTES — {dealer_p} · {CIUDAD}{titulo_estado}**")
@@ -1395,20 +1547,15 @@ def render_pendientes():
     ds_p = ds_p.sort_values("Asesor").reset_index(drop=True)
     ds_p["Celular"] = ds_p["Celular"].astype(str).str.replace(".0","",regex=False)
     
-    styled_pend = ds_p.style.apply(lambda x: ['color: #D32F2F; font-weight: bold;' if x['Estado'] == 'Expirado' else ('color: #FF8C00; font-weight: bold;' if x['Estado'] == 'Contacto en uso' else '') for c in x.index], axis=1).set_properties(**{'text-align': 'center'}).set_table_styles([
-        {'selector': 'th', 'props': [('background-color', '#1A1A2E'), ('color', 'white'), ('font-weight', 'bold'), ('text-align', 'center'), ('padding', '10px')]},
-        {'selector': 'td', 'props': [('padding', '8px'), ('border', '1px solid #E0E0E0')]},
-        {'selector': 'tr:nth-child(even)', 'props': [('background-color', '#F8F8F8')]}
-    ])
-    
-    st.dataframe(styled_pend, use_container_width=True, hide_index=True)
+    st_p = ds_p.style.apply(lambda row: ["color:#D32F2F;font-weight:bold" if c == "Estado" and row["Estado"] == "Expirado" else ("color:#FF8C00;font-weight:bold" if c == "Estado" and row["Estado"] == "Contacto en uso" else "") for c in row.index], axis=1).set_table_attributes('class="tabla-voc"').hide(axis="index")
+    st.markdown(tabla_html(st_p), unsafe_allow_html=True)
     
     if not ds_p.empty:
-        img_bytes = cached_image_pendientes(ds_p, 'pendientes')
-        if img_bytes:
-            st.download_button("📷 Descargar Pendientes", data=img_bytes, file_name="Pendientes.jpg", mime="image/jpeg", key="dl_pend")
+        jpg_bytes_pend = cached_jpg_export(ds_p, 'pendientes')
+        st.download_button("Descargar Pendientes", data=jpg_bytes_pend, file_name="Pendientes.jpg", mime="image/jpeg", key="dl_pend")
     st.markdown("</div>",unsafe_allow_html=True)
 
+    # --- TABLA 2: RESUMEN POR ASESOR ---
     st.markdown("<div class='chart-box'>",unsafe_allow_html=True)
     st.markdown("**Resumen por Asesor**")
     
@@ -1439,20 +1586,12 @@ def render_pendientes():
         for col in ["Total Enviadas", "Completadas", "Vencidas", "Pendientes"]:
             if col in res_a.columns: res_a[col] = res_a[col].astype(int)
 
-    styled_res = res_a.style.apply(lambda x: ['background-color: #FFCCCC; font-weight: bold;' if x['Vencidas'] > 0 else ('background-color: #E8E8E8; font-weight: bold;' if x['Asesor'] == 'TOTAL GENERAL' else '') for c in x.index], axis=1).format({
-        'Total Enviadas': '{:.0f}', 'Completadas': '{:.0f}', 'Vencidas': '{:.0f}', 'Pendientes': '{:.0f}'
-    }).set_properties(**{'text-align': 'center'}).set_table_styles([
-        {'selector': 'th', 'props': [('background-color', '#1A1A2E'), ('color', 'white'), ('font-weight', 'bold'), ('text-align', 'center'), ('padding', '10px')]},
-        {'selector': 'td', 'props': [('padding', '8px'), ('border', '1px solid #E0E0E0')]},
-        {'selector': 'tr:nth-child(even)', 'props': [('background-color', '#F8F8F8')]}
-    ])
-    
-    st.dataframe(styled_res, use_container_width=True, hide_index=True)
+    st_ra = res_a.style.apply(lambda row: ["background-color:#ffcccc;color:black;font-weight:bold" if c == "Vencidas" and row["Vencidas"] > 0 else ("background-color:#E8E8E8;font-weight:bold" if row["Asesor"] == "TOTAL GENERAL" else "") for c in row.index], axis=1).format({"Total Enviadas":"{:.0f}", "Completadas":"{:.0f}", "Vencidas":"{:.0f}", "Pendientes":"{:.0f}"}).set_table_attributes('class="tabla-voc"').hide(axis="index")
+    st.markdown(tabla_html(st_ra), unsafe_allow_html=True)
     
     if not res_a.empty:
-        img_bytes = cached_image_pendientes(res_a, 'resumen')
-        if img_bytes:
-            st.download_button("📷 Descargar Resumen", data=img_bytes, file_name="Resumen_Asesor.jpg", mime="image/jpeg", key="dl_res_asesor")
+        jpg_bytes_res = cached_jpg_export(res_a, 'resumen')
+        st.download_button("Descargar Resumen", data=jpg_bytes_res, file_name="Resumen_Asesor.jpg", mime="image/jpeg", key="dl_res_asesor")
     st.markdown("</div>",unsafe_allow_html=True)
 
 # ==============================================================================
@@ -1520,6 +1659,9 @@ def render_verbalizaciones():
         </div>
         """
 
+    # =========================================================================
+    # GRÁFICA 1: MAPA DE IMPACTO
+    # =========================================================================
     st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
     st.markdown(titulo_grafica("Impacto Estratégico de Verbalizaciones"), unsafe_allow_html=True)
     
@@ -1554,6 +1696,9 @@ def render_verbalizaciones():
                        file_name=f"Impacto_Verbalizaciones_{mes_sel}.jpg", mime="image/jpeg", key="dl_verb_1")
     st.markdown("</div>", unsafe_allow_html=True)
 
+    # =========================================================================
+    # GRÁFICA 2: TOP TEMAS
+    # =========================================================================
     st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
     st.markdown(titulo_grafica("Ranking de Temas más comentados"), unsafe_allow_html=True)
     
@@ -1578,14 +1723,18 @@ def render_verbalizaciones():
     st.download_button("Descargar Ranking de Temas", data=fig_to_buf(fig2).getvalue(), 
                        file_name=f"Ranking_Verbalizaciones_{mes_sel}.jpg", mime="image/jpeg", key="dl_verb_2")
     st.markdown("</div>", unsafe_allow_html=True)
-
+\
 # ==============================================================================
 # SECCIÓN 7: PERFIL APS
 # ==============================================================================
 def render_vista_aps():
+
     st.markdown("""
         <style>
             .stSelectbox label p { font-size: 18px !important; font-weight: bold !important; color: #1A1A2E !important; }
+            .tabla-voc { border: 2px solid #1A1A2E !important; border-collapse: collapse !important; width: 100% !important; }
+            .tabla-voc td { font-size: 18px !important; color: #000000 !important; font-weight: bold !important; border: 1px solid #CFD8DC !important; padding: 8px !important; }
+            .tabla-voc th { font-size: 18px !important; color: #FFFFFF !important; background-color: #1A1A2E !important; font-weight: bold !important; border: 1px solid #1A1A2E !important; padding: 10px !important; text-align: center !important; }
         </style>
     """, unsafe_allow_html=True)
 
@@ -1633,6 +1782,9 @@ def render_vista_aps():
         elif val >= obj - 0.03: return "#F57F17"
         else: return "#D32F2F"
 
+    # =========================================================================
+    # 1. KPIs Y RANKING
+    # =========================================================================
     k1, k2, k3 = st.columns(3)
     with k1: st.markdown(kpi_html("Encuestas Enviadas", e_tot, "{:.0f}", f"Objetivo TRE: {obj_tre:.0%}"), unsafe_allow_html=True)
     with k2: st.markdown(kpi_html("Resultado TRE", tre_val, "{:.1%}", "Eficiencia", color=color_estado(tre_val, obj_tre)), unsafe_allow_html=True)
@@ -1697,6 +1849,9 @@ def render_vista_aps():
         """, unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
+    # =========================================================================
+    # 2. GESTIÓN Y AGENDA
+    # =========================================================================
     st.markdown("<h5 style='color:#1A1A2E; margin-top:25px; font-weight:bold;'>Gestión de Encuestas y Agenda</h5>", unsafe_allow_html=True)
     exp = len(aplicar_filtro_ciudad(D["pendientes"], CIUDAD).query(f"aps_nombre=='{aps_sel}' and status=='Contacto en uso' and fecha_validez < '{pd.Timestamp.today().normalize()}'"))
     i1, i2, i3 = st.columns(3)
@@ -1709,13 +1864,13 @@ def render_vista_aps():
     df_p_show = aplicar_filtro_ciudad(D["pendientes"], CIUDAD).query(f"aps_nombre=='{aps_sel}' and status=='Contacto en uso'")[["cliente_nombre", "cliente_celular", "fecha_validez"]]
     if not df_p_show.empty:
         df_p_show.columns = ["Nombre del Cliente", "Celular de Contacto", "Vence en"]
-        st.dataframe(df_p_show.style.set_properties(**{'text-align': 'center'}).set_table_styles([
-            {'selector': 'th', 'props': [('background-color', '#1A1A2E'), ('color', 'white'), ('font-weight', 'bold'), ('text-align', 'center'), ('padding', '10px')]},
-            {'selector': 'td', 'props': [('padding', '8px'), ('border', '1px solid #E0E0E0')]}
-        ]), use_container_width=True, hide_index=True)
+        st.markdown(tabla_html(df_p_show.style.hide(axis="index").set_table_attributes('class="tabla-voc"')), unsafe_allow_html=True)
     else: st.success("¡Sin pendientes!")
     st.markdown("</div>", unsafe_allow_html=True)
 
+    # =========================================================================
+    # 3. ATRIBUTOS TOP 3
+    # =========================================================================
     df_at = filtrar(D["atrib_aps"], fytd=fytd_sel, ciudad=CIUDAD, aps=aps_sel)
     df_at = df_at[df_at["mes_anio"].isin(meses_proc)]
     fort, aler = [], []
@@ -1739,6 +1894,9 @@ def render_vista_aps():
                 st.markdown(f"<div style='background:{c_hex}; border-left:5px solid {'#4CAF50' if 'Fort' in tit else '#F44336'}; padding:10px; margin-bottom:5px; border-radius:4px;'><span style='color:#000; font-weight:bold; font-size:14px;'>{x['attr']}</span><br><span style='font-size:19px; font-weight:900; color:#000;'>{x['val']:.1%}</span> <span style='font-size:12px; color:#444; font-weight:bold;'>(Meta: {x['meta']:.0%})</span></div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
+    # =========================================================================
+    # 4. EVOLUCIÓN HISTÓRICA (ISC Y TRE)
+    # =========================================================================
     st.markdown("<h5 style='color:#1A1A2E; margin-top:25px; font-weight:bold;'>Evolución de Mis Indicadores</h5>", unsafe_allow_html=True)
     
     halo = [path_effects.withStroke(linewidth=3.5, foreground="white", alpha=0.9)]
@@ -1814,6 +1972,7 @@ import matplotlib.patches as patches
 COLOR_TAIYO = "#C62828" 
 
 def preparar_diapositiva(title_slide=None):
+    """Genera el lienzo 16:9 con el encabezado premium (Texto Blanco y Grande)."""
     fig = plt.figure(figsize=(16, 9), facecolor='white')
     
     rect = patches.Rectangle((0, 0.92), 1, 0.08, transform=fig.transFigure, color='#1A1A2E', zorder=0)
@@ -1842,6 +2001,7 @@ def construir_pdf(fytd_sel, mes_sel, dealer_sel, aps_sel, acum, ciudad, mm):
     PALETA_ATR = ["#1976D2", "#D32F2F", "#388E3C", "#9C27B0", "#FF9800", "#00BCD4", "#E91E63", "#795548", "#607D8B"]
 
     with PdfPages(pdf_buf) as pdf:
+        # 1. CARÁTULA
         fig_c, ax_c = plt.subplots(figsize=(16, 9), facecolor='white')
         ax_c.axis('off')
         ax_c.add_patch(patches.Rectangle((0, 0), 1, 1, color='#1A1A2E', transform=ax_c.transAxes))
@@ -1854,6 +2014,7 @@ def construir_pdf(fytd_sel, mes_sel, dealer_sel, aps_sel, acum, ciudad, mm):
         ax_c.text(0.1, 0.32, det, color='#E0E0E0', fontsize=18, ha='left', transform=ax_c.transAxes)
         pdf.savefig(fig_c, bbox_inches='tight', dpi=300); plt.close(fig_c)
 
+        # 2. TRE E ISC
         df_im = filtrar(D["isc_mensual"][D["isc_mensual"]["mes_anio"].isin(meses_proc)], fytd=fytd_sel, ciudad=ciudad)
         df_tm = filtrar(D["tre_mensual"][D["tre_mensual"]["mes_anio"].isin(meses_proc)], fytd=fytd_sel, ciudad=ciudad)
         obj_t = get_obj(D["objetivos"], fytd_sel, "obj_tre"); obj_i = get_obj(D["objetivos"], fytd_sel, "obj_isc")
@@ -1867,9 +2028,7 @@ def construir_pdf(fytd_sel, mes_sel, dealer_sel, aps_sel, acum, ciudad, mm):
         
         fig_dual, _ = preparar_diapositiva("Desempeño Operativo: TRE e ISC")
         ax_l = fig_dual.add_axes([0.04, 0.1, 0.44, 0.70]); ax_l.axis('off'); ax_l.set_title("RESUMEN POR TALLER", fontsize=14, fontweight='bold', color=COLOR_TAIYO, pad=10)
-        img_gral = cached_image_gen(ds_d.fillna(0), 'gral', obj_t, obj_i)
-        if img_gral:
-            ax_l.imshow(Image.open(io.BytesIO(img_gral)))
+        ax_l.imshow(Image.open(io.BytesIO(cached_jpg_gen(ds_d.fillna(0), 'gral', obj_t, obj_i))))
         
         df_ia = filtrar(D["isc_aps"][D["isc_aps"]["mes_anio"].isin(meses_proc)], fytd=fytd_sel, ciudad=ciudad, dealer=dealer_sel if dealer_sel!="GENERAL" else None)
         df_ta = filtrar(D["tre_aps"][D["tre_aps"]["mes_anio"].isin(meses_proc)], fytd=fytd_sel, ciudad=ciudad, dealer=dealer_sel if dealer_sel!="GENERAL" else None)
@@ -1882,11 +2041,10 @@ def construir_pdf(fytd_sel, mes_sel, dealer_sel, aps_sel, acum, ciudad, mm):
             tot_ap["prom_tre"] = tot_ap["C"]/tot_ap["E"] if tot_ap["E"]>0 else 0; tot_ap["prom_isc"] = (tot_ap["enc"] - tot_ap["i16"]*2 - tot_ap["i78"])/tot_ap["enc"] if tot_ap["enc"]>0 else 0
             ds_ap = pd.concat([df_ap, pd.DataFrame([tot_ap])], ignore_index=True)[["aps_nombre","E","C","prom_tre","i16","i78","prom_isc"]]; ds_ap.columns = ["Nombre","Enviadas","Completadas","TRE %","1-6","7-8","% ISC"]
             ax_r = fig_dual.add_axes([0.52, 0.1, 0.44, 0.70]); ax_r.axis('off'); ax_r.set_title("DETALLE POR ASESOR (APS)", fontsize=14, fontweight='bold', color=COLOR_TAIYO, pad=10)
-            img_aps = cached_image_gen(ds_ap.fillna(0), 'aps', obj_t, obj_i)
-            if img_aps:
-                ax_r.imshow(Image.open(io.BytesIO(img_aps)))
+            ax_r.imshow(Image.open(io.BytesIO(cached_jpg_gen(ds_ap.fillna(0), 'aps', obj_t, obj_i))))
         pdf.savefig(fig_dual, bbox_inches='tight', dpi=300); plt.close(fig_dual)
 
+        # 3. ATRIBUTOS ESPECIALES
         ruta_esp = CARPETA_DATOS / "11_atributos_especiales.csv"
         df_esp = pd.read_csv(ruta_esp) if ruta_esp.exists() else pd.DataFrame()
         if not df_esp.empty:
@@ -1915,6 +2073,7 @@ def construir_pdf(fytd_sel, mes_sel, dealer_sel, aps_sel, acum, ciudad, mm):
                 ax.text(0.5, 0.08, "¡CUMPLIDO!" if val >= obj_v else "NO CUMPLIDO", fontsize=16, fontweight='900', color=c_c, ha='center', va='center')
             pdf.savefig(f3, bbox_inches='tight', dpi=300); plt.close(f3)
 
+        # 4. TENDENCIA ISC
         f4, ax_img4 = preparar_diapositiva("Evolución Histórica: Índice de Satisfacción")
         df_base_t_full = filtrar(D["isc_aps"] if dealer_sel != "GENERAL" else D["isc_mensual"], fytd=fytd_sel, ciudad=ciudad)
         if dealer_sel != "GENERAL": df_base_t_full = df_base_t_full[df_base_t_full["dealer"] == dealer_sel]
@@ -1938,11 +2097,9 @@ def construir_pdf(fytd_sel, mes_sel, dealer_sel, aps_sel, acum, ciudad, mm):
             else:
                 for i, an in enumerate(sorted([x for x in df_base_t_full["aps_nombre"].unique() if str(x).strip().upper() != "SIN ASESOR"])):
                     s_sec[an] = serie_t(df_base_t_full[df_base_t_full["aps_nombre"] == an]); c_sec[an] = COLOR_TAIYO if an == aps_sel else PALETA_APS[i % len(PALETA_APS)]; m_sec[an] = "o"
-            img_ten = cached_plot_tendencia(tuple(m_ord), tuple(tots), tuple(prom_vals), s_sec, c_sec, m_sec, obj_i, "SELECCIÓN" if aps_sel != "TODOS" else "PROM. GENERAL", "", "")
-            ax_img4.imshow(Image.open(io.BytesIO(img_ten)))
-            pdf.savefig(f4, bbox_inches='tight', dpi=300)
-        plt.close(f4)
+            img_ten = cached_plot_tendencia(tuple(m_ord), tuple(tots), tuple(prom_vals), s_sec, c_sec, m_sec, obj_i, "SELECCIÓN" if aps_sel != "TODOS" else "PROM. GENERAL", "", ""); ax_img4.imshow(Image.open(io.BytesIO(img_ten))); pdf.savefig(f4, bbox_inches='tight', dpi=300); plt.close(f4)
 
+        # 5. ATRIBUTOS (RADIAL + TABLA)
         f5, _ = preparar_diapositiva("Diagnóstico de Atributos: Radial y Tabla")
         df_at_full = filtrar(D["atrib_aps"] if dealer_sel!="GENERAL" else D["atributos"], fytd=fytd_sel, ciudad=ciudad)
         if dealer_sel != "GENERAL": df_at_full = df_at_full[df_at_full["dealer"]==dealer_sel]
@@ -1969,8 +2126,7 @@ def construir_pdf(fytd_sel, mes_sel, dealer_sel, aps_sel, acum, ciudad, mm):
             ax_rad.spines['polar'].set_visible(False); ax_rad.set_xticks([]); ax_rad.set_yticks([0.2,0.4,0.6,0.8,1.0]); ax_rad.set_yticklabels([]); ax_rad.set_ylim(0,1.35)
             for i,(angle,attr) in enumerate(zip(angles[:-1],attrs)): ax_rad.text(angle, 1.30, f"{textwrap.fill(attr,14)}\n{res_gen.get(attr,0):.1%}", ha="left" if angle<np.pi else "right", va="center", fontsize=7.5, fontweight='bold', color='#333')
             ax_rad.legend(loc="lower center", bbox_to_anchor=(0.5, -0.20), fontsize=7, frameon=False, ncol=2)
-            ax_tbl = f5.add_axes([0.48, 0.05, 0.50, 0.82]); ax_tbl.axis('off')
-            data_t = []
+            ax_tbl = f5.add_axes([0.48, 0.05, 0.50, 0.82]); ax_tbl.axis('off'); data_t = []
             if dealer_sel == "GENERAL":
                 d_en = sorted([d for d in df_at_p_full["dealer"].unique() if d != "SIN DEALER"])
                 for a in attrs:
@@ -1985,12 +2141,9 @@ def construir_pdf(fytd_sel, mes_sel, dealer_sel, aps_sel, acum, ciudad, mm):
                     for an in aps_en: g_a = df_at_p_full[(df_at_p_full['atributo']==a)&(df_at_p_full['aps_nombre']==an)]; row[an] = (g_a[sc_col]*g_a["n_respuestas"]).sum()/g_a["n_respuestas"].sum() if "n_respuestas" in g_a.columns and g_a["n_respuestas"].sum()>0 else (g_a[sc_col].mean() if not g_a.empty else np.nan)
                     row["GENERAL"] = res_gen.get(a, np.nan); row["Objetivo"] = 0.9; row["GAP"] = row["GENERAL"]-0.9; data_t.append(row)
                 df_t = pd.DataFrame(data_t).sort_values("GENERAL", ascending=True); cols_ev = tuple(aps_en + ["GENERAL"])
-            img_attr = cached_image_attr_table(df_t.fillna(np.nan), cols_ev)
-            if img_attr:
-                ax_tbl.imshow(Image.open(io.BytesIO(img_attr)))
-            pdf.savefig(f5, bbox_inches='tight', dpi=300)
-            plt.close(f5)
+            ax_tbl.imshow(Image.open(io.BytesIO(cached_jpg_attr_table(df_t.fillna(np.nan), cols_ev)))); pdf.savefig(f5, bbox_inches='tight', dpi=300); plt.close(f5)
 
+            # HISTÓRICOS ATRIBUTOS
             sorted_attrs = sorted(attrs, key=lambda x: res_gen.get(x,0))
             for a in sorted_attrs:
                 f_a, ax_a = preparar_diapositiva(f"Evolución Atributo: {a}")
@@ -2004,19 +2157,16 @@ def construir_pdf(fytd_sel, mes_sel, dealer_sel, aps_sel, acum, ciudad, mm):
                 d_h, c_m = {}, {}
                 if dealer_sel == "GENERAL":
                     d_h["TOTAL GENERAL"] = get_tr(D["atributos"][D["atributos"]["atributo"]==a]); c_m["TOTAL GENERAL"] = "#000"
-                    for i, d in enumerate(sorted([x for x in D["atributos"]["dealer"].unique() if x != "SIN DEALER"])): 
-                        d_h[d] = get_tr(D["atributos"][(D["atributos"]["atributo"]==a)&(D["atributos"]["dealer"]==d)]); c_m[d] = PALETA_ATR[i % len(PALETA_ATR)]
+                    for i, d in enumerate(sorted([x for x in D["atributos"]["dealer"].unique() if x != "SIN DEALER"])): d_h[d] = get_tr(D["atributos"][(D["atributos"]["atributo"]==a)&(D["atributos"]["dealer"]==d)]); c_m[d] = PALETA_ATR[i % len(PALETA_ATR)]
                 else:
                     lbl_tot = f"PROM {aps_sel}" if aps_sel != "TODOS" else f"TOTAL {dealer_sel}"
                     d_h[lbl_tot] = get_tr(D["atrib_aps"][(D["atrib_aps"]["atributo"]==a)&(D["atrib_aps"]["dealer"]==dealer_sel)&(D["atrib_aps"]["aps_nombre"]==aps_sel)] if aps_sel!="TODOS" else D["atributos"][(D["atributos"]["atributo"]==a)&(D["atributos"]["dealer"]==dealer_sel)])
                     c_m[lbl_tot] = "#000"
                     for i, an in enumerate(sorted([x for x in D["atrib_aps"][(D["atrib_aps"]["dealer"]==dealer_sel)]["aps_nombre"].unique() if str(x).strip().upper() != "SIN ASESOR"])): 
                         d_h[an] = get_tr(D["atrib_aps"][(D["atrib_aps"]["atributo"]==a)&(D["atrib_aps"]["dealer"]==dealer_sel)&(D["atrib_aps"]["aps_nombre"]==an)]); c_m[an] = COLOR_TAIYO if an == aps_sel else PALETA_APS[i % len(PALETA_APS)]
-                img_hist = cached_hist_plot_attr(d_h, c_m, tuple(m_ord), 0.9, "", dealer_sel, aps_sel)
-                ax_a.imshow(Image.open(io.BytesIO(img_hist)))
-                pdf.savefig(f_a, bbox_inches='tight', dpi=300)
-                plt.close(f_a)
+                ax_a.imshow(Image.open(io.BytesIO(cached_hist_plot_attr(d_h, c_m, tuple(m_ord), 0.9, "", dealer_sel, aps_sel)))); pdf.savefig(f_a, bbox_inches='tight', dpi=300); plt.close(f_a)
 
+        # 6. VERBALIZACIONES
         df_v = D["verbaliz"].copy()
         if not df_v.empty:
             meses_cortos = [str(m).split()[0].strip().capitalize() for m in meses_proc]
@@ -2026,35 +2176,23 @@ def construir_pdf(fytd_sel, mes_sel, dealer_sel, aps_sel, acum, ciudad, mm):
                 df_v["sat_neta"] = df_v["SATISFACCIÓN NETA"].apply(cl_p); df_v["menciones_pct"] = df_v["Comentarios relacionados"].apply(cl_p)
                 df_g = df_v.groupby("Sub-Categoría").agg({"sat_neta":"mean", "menciones_pct":"sum"}).reset_index().query("menciones_pct > 0").sort_values("menciones_pct")
                 if not df_g.empty:
-                    f_v1, ax_main1 = preparar_diapositiva("Impacto Estratégico de Verbalizaciones")
-                    ax_main1.remove()
-                    ax_v1 = f_v1.add_axes([0.25, 0.08, 0.70, 0.70])
-                    yp = np.arange(len(df_g))
-                    ax_v1.hlines(y=yp, xmin=0, xmax=100, color='#EEEEEE')
-                    ax_v1.axvline(75, color=COLOR_OBJETIVO, linestyle='--')
+                    # SLIDE A: MAPA
+                    f_v1, ax_main1 = preparar_diapositiva("Impacto Estratégico de Verbalizaciones"); ax_main1.remove(); ax_v1 = f_v1.add_axes([0.25, 0.08, 0.70, 0.70])
+                    yp = np.arange(len(df_g)); ax_v1.hlines(y=yp, xmin=0, xmax=100, color='#EEEEEE'); ax_v1.axvline(75, color=COLOR_OBJETIVO, linestyle='--')
                     ax_v1.scatter(df_g["sat_neta"], yp, s=df_g["menciones_pct"]*110+200, c=['#D32F2F' if s<60 else '#FF9800' if s<85 else '#388E3C' for s in df_g["sat_neta"]], edgecolors="white")
                     for i, s in enumerate(df_g["sat_neta"]): ax_v1.text(s, i, f"{s:.0f}%", ha='center', va='center', fontsize=9.5, color="white", fontweight='bold')
-                    ax_v1.set_yticks(yp)
-                    ax_v1.set_yticklabels([textwrap.fill(x, 28) for x in df_g["Sub-Categoría"]], fontsize=11, fontweight='bold', color="#1A1A2E")
-                    ax_v1.set_xlim(-5, 105)
-                    ax_v1.xaxis.set_major_formatter(mtick.PercentFormatter(100.0))
-                    pdf.savefig(f_v1, bbox_inches='tight', dpi=300)
-                    plt.close(f_v1)
+                    ax_v1.set_yticks(yp); ax_v1.set_yticklabels([textwrap.fill(x, 28) for x in df_g["Sub-Categoría"]], fontsize=11, fontweight='bold', color="#1A1A2E")
+                    ax_v1.set_xlim(-5, 105); ax_v1.xaxis.set_major_formatter(mtick.PercentFormatter(100.0)); pdf.savefig(f_v1, bbox_inches='tight', dpi=300); plt.close(f_v1)
                     
-                    f_v2, ax_main2 = preparar_diapositiva("Ranking de Temas más comentados")
-                    ax_main2.remove()
-                    ax_v2 = f_v2.add_axes([0.25, 0.08, 0.70, 0.70])
+                    # SLIDE B: RANKING
+                    f_v2, ax_main2 = preparar_diapositiva("Ranking de Temas más comentados"); ax_main2.remove(); ax_v2 = f_v2.add_axes([0.25, 0.08, 0.70, 0.70])
                     df_top = df_g.sort_values("menciones_pct", ascending=True).tail(12)
                     bars = ax_v2.barh(df_top["Sub-Categoría"], df_top["menciones_pct"], color=['#D32F2F' if s<75 else '#388E3C' for s in df_top["sat_neta"]], alpha=0.8)
                     for bar in bars: ax_v2.text(bar.get_width() + 0.3, bar.get_y() + bar.get_height()/2, f'{bar.get_width():.1f}%', va='center', fontsize=11, fontweight='bold', color="#1A1A2E")
-                    ax_v2.set_xlim(0, df_top["menciones_pct"].max() * 1.2)
-                    ax_v2.set_yticks(np.arange(len(df_top)))
-                    ax_v2.set_yticklabels([textwrap.fill(x, 28) for x in df_top["Sub-Categoría"]], fontsize=11, fontweight='bold', color="#1A1A2E")
-                    pdf.savefig(f_v2, bbox_inches='tight', dpi=300)
-                    plt.close(f_v2)
+                    ax_v2.set_xlim(0, df_top["menciones_pct"].max() * 1.2); ax_v2.set_yticks(np.arange(len(df_top))); ax_v2.set_yticklabels([textwrap.fill(x, 28) for x in df_top["Sub-Categoría"]], fontsize=11, fontweight='bold', color="#1A1A2E")
+                    pdf.savefig(f_v2, bbox_inches='tight', dpi=300); plt.close(f_v2)
 
-    pdf_buf.seek(0)
-    return pdf_buf.getvalue()
+    pdf_buf.seek(0); return pdf_buf.getvalue()
 
 def render_descargas():
     st.markdown("<div class='seccion-titulo'>Generador de Informes Ejecutivos PDF</div>", unsafe_allow_html=True)
@@ -2083,8 +2221,7 @@ def render_descargas():
         
     if st.button("GENERAR INFORME TAIYO MOTORS (PDF)", type="primary", use_container_width=True):
         with st.spinner("Compilando arquitectura corporativa y diapositivas de alta definición..."):
-            pdf_bytes = construir_pdf(fytd_pdf, mes_pdf, dealer_pdf, aps_pdf, acum_pdf, CIUDAD, mm)
-            st.session_state.pdf_ready = pdf_bytes
+            pdf_bytes = construir_pdf(fytd_pdf, mes_pdf, dealer_pdf, aps_pdf, acum_pdf, CIUDAD, mm); st.session_state.pdf_ready = pdf_bytes
             
     if st.session_state.get("pdf_ready"):
         st.download_button(label="DESCARGAR REPORTE PDF", data=st.session_state.pdf_ready, file_name=f"Reporte_VoC_Taiyo_{CIUDAD}_{mes_pdf if mes_pdf!='TODOS' else fytd_pdf}.pdf", mime="application/pdf", use_container_width=True)
@@ -2093,6 +2230,7 @@ def render_descargas():
 # SECCIÓN DE INICIO
 # ==============================================================================
 def render_caratula():
+
     st.markdown("""
 <style>
     [data-testid="stSidebar"], [data-testid="collapsedControl"], [data-testid="stHeader"], footer { display: none !important; }
@@ -2118,7 +2256,7 @@ def render_caratula():
             st.rerun()
 
 # ==============================================================================
-# ENRUTADOR
+# ENRUTADOR ACTUALIZADO
 # ==============================================================================
 sec = st.session_state.get("seccion", "caratula")
 if   sec == "caratula":       render_caratula()
