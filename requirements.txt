@@ -1,0 +1,11 @@
+streamlit
+pandas
+numpy
+matplotlib
+scipy
+dataframe-image
+Pillow
+google-cloud-storage
+google-auth
+openpyxl
+xlrd
