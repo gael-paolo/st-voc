@@ -99,251 +99,112 @@ def fig_to_buf(fig):
 def styler_to_jpg_buf(styler):
     """
     Convierte un pandas Styler a JPEG usando matplotlib.
-    Parsea el bloque <style> del HTML (IDs tipo #T_xxxx_rowR_colC)
-    para extraer colores y estilos exactos por celda.
-    No requiere Playwright, Chromium ni dataframe_image.
+    Reemplaza dataframe_image (que requiere Playwright/Chromium).
+    Compatible con Streamlit Cloud sin dependencias de browser.
     """
-    import re as _re
+    df = styler.data.copy()
+    n_rows, n_cols = df.shape
 
-    html = styler.to_html(index=False)
+    # Obtener estilos aplicados celda a celda
+    rendered = styler.export()  # dict de estilos internos
+    try:
+        # Intentar obtener el mapa de colores del styler renderizado
+        style_map = {}
+        ctx = styler._translate(sparse_index=False, sparse_columns=False)
+        for row_data in ctx.get("body", []):
+            for cell in row_data:
+                r = cell.get("row", 0)
+                c_idx = cell.get("col", -1)
+                if c_idx < 0: continue
+                props_str = cell.get("props", "")
+                style_map[(r, c_idx)] = props_str
+    except Exception:
+        style_map = {}
 
-    # ── 1. Extraer mapa de estilos desde el bloque <style> ───────────
-    # Formato: #T_xxxx_rowR_colC { background-color: #xxx; color: yyy; }
-    # o selector múltiple: #T_xxxx_row0_col1, #T_xxxx_row1_col2 { ... }
-    style_map = {}   # (row, col) → {"background-color": "#xxx", "color": "yyy", "font-weight": "bold"}
-
-    style_block = _re.search(r'<style[^>]*>(.*?)</style>', html, _re.DOTALL)
-    if style_block:
-        css = style_block.group(1)
-        # Partir en bloques selector { propiedades }
-        blocks = _re.findall(r'([^{}]+)\{([^{}]+)\}', css)
-        for selector_raw, props_raw in blocks:
-            # Parsear propiedades
-            props = {}
-            for decl in props_raw.split(";"):
-                decl = decl.strip()
-                if ":" not in decl: continue
-                k, v = decl.split(":", 1)
-                props[k.strip()] = v.strip()
-            if not props: continue
-            # Extraer todos los row/col del selector
-            for m in _re.finditer(r'_row(\d+)_col(\d+)', selector_raw):
-                r, c = int(m.group(1)), int(m.group(2))
-                style_map[(r, c)] = props
-
-    # ── 2. Extraer texto formateado y estructura de la tabla ──────────
-    # Cabecera
-    headers = _re.findall(r'<th[^>]*>\s*(.*?)\s*</th>', html, _re.DOTALL)
-    headers = [_re.sub(r'<[^>]+>', '', h).strip() for h in headers]
-
-    # Filas: extraer id y texto de cada <td>
-    rows_data = []   # lista de listas: (text, row_idx, col_idx)
-    for tr in _re.findall(r'<tr>(.*?)</tr>', html, _re.DOTALL):
-        tds = _re.findall(r'<td[^>]*id="[^"]*_row(\d+)_col(\d+)"[^>]*>(.*?)</td>', tr, _re.DOTALL)
-        if not tds: continue
-        row = []
-        for ri_s, ci_s, content in tds:
-            ri, ci = int(ri_s), int(ci_s)
-            text = _re.sub(r'<[^>]+>', '', content).strip()
-            props = style_map.get((ri, ci), {})
-            bg   = props.get("background-color", "#FFFFFF")
-            fg   = props.get("color", "#1A1A1A")
-            bold = props.get("font-weight", "") == "bold"
-            row.append((text, bg, fg, bold))
-        if row: rows_data.append(row)
-
-    n_rows = len(rows_data)
-    n_cols = len(headers) if headers else (max(len(r) for r in rows_data) if rows_data else 1)
-
-    # ── 3. Calcular anchos proporcionales al contenido ────────────────
-    col_max_chars = [len(str(h)) for h in headers] if headers else [8]*n_cols
-    for row in rows_data:
-        for ci, (txt, *_) in enumerate(row):
-            if ci < len(col_max_chars):
-                col_max_chars[ci] = max(col_max_chars[ci], len(str(txt)))
-
-    total_chars = sum(col_max_chars) or 1
-    col_widths  = [c / total_chars for c in col_max_chars]
-    fig_w       = max(8, min(22, total_chars * 0.19 + 1.0))
-    row_h       = 0.44
-    header_h    = 0.54
-    fig_h       = header_h + row_h * n_rows + 0.2
-
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h), facecolor="white")
-    ax.set_xlim(0, 1); ax.set_ylim(0, fig_h); ax.axis("off")
-
-    # ── 4. Cabecera ───────────────────────────────────────────────────
-    x = 0.0; y_hdr = fig_h - header_h
-    for h, cw in zip(headers, col_widths):
-        ax.add_patch(plt.Rectangle((x, y_hdr), cw, header_h,
-                     facecolor="#1A1A2E", edgecolor="white", linewidth=0.5))
-        ax.text(x + cw/2, y_hdr + header_h/2, str(h),
-                ha="center", va="center", fontsize=7.5,
-                fontweight="bold", color="white")
-        x += cw
-
-    # ── 5. Filas ──────────────────────────────────────────────────────
-    for ri, row in enumerate(rows_data):
-        y_row = fig_h - header_h - row_h * (ri + 1)
-        x = 0.0
-        row_default_bg = "#F5F5F5" if ri % 2 == 1 else "#FFFFFF"
-        for ci, cw in enumerate(col_widths):
-            if ci < len(row):
-                txt, bg, fg, bold = row[ci]
-            else:
-                txt, bg, fg, bold = "", row_default_bg, "#1A1A1A", False
-            cell_bg = bg if bg not in ("#FFFFFF", "", "white") else row_default_bg
-            ax.add_patch(plt.Rectangle((x, y_row), cw, row_h,
-                         facecolor=cell_bg, edgecolor="#E0E0E0", linewidth=0.3))
-            ax.text(x + cw/2, y_row + row_h/2, str(txt),
-                    ha="center", va="center", fontsize=7,
-                    fontweight="bold" if bold else "normal", color=fg)
-            x += cw
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="jpeg", facecolor="white",
-                bbox_inches="tight", dpi=180)
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-    # ── 1. Renderizar a HTML y parsear ──────────────────────────────
-    html = styler.to_html(index=False)
-
-    # Limpiar namespaces y atributos problemáticos para ET
-    html_clean = _re.sub(r' id="[^"]*"', '', html)
-    html_clean = _re.sub(r' class="[^"]*"', '', html_clean)
-    html_clean = _re.sub(r'<!DOCTYPE[^>]*>', '', html_clean)
-    html_clean = _re.sub(r'<style>.*?</style>', '', html_clean, flags=_re.DOTALL)
-
-    def parse_inline_style(style_str):
-        """Extrae background-color, color y font-weight de un style inline."""
+    def parse_bg(props):
         bg, fg, bold = "#FFFFFF", "#1A1A1A", False
-        if not style_str:
-            return bg, fg, bold
-        for part in style_str.split(";"):
+        if not props: return bg, fg, bold
+        for part in props.split(";"):
             part = part.strip()
-            if not part: continue
-            if "background-color" in part:
-                val = part.split(":", 1)[1].strip()
-                if val and val != "transparent": bg = val
-            elif part.startswith("color"):
-                val = part.split(":", 1)[1].strip()
-                if val: fg = val
+            if part.startswith("background-color:"):
+                bg = part.split(":")[1].strip()
+            elif part.startswith("color:"):
+                fg = part.split(":")[1].strip()
             if "bold" in part:
                 bold = True
         return bg, fg, bold
 
-    # ── 2. Extraer filas del HTML ────────────────────────────────────
-    headers = []
-    rows_data = []   # lista de listas de (text, bg, fg, bold)
-
+    # Formatear valores con el formato del styler
     try:
-        root = ET.fromstring(f"<root>{html_clean}</root>")
+        fmt_df = styler.to_pandas() if hasattr(styler, "to_pandas") else df
+    except Exception:
+        fmt_df = df
 
-        def find_all(node, tag):
-            results = []
-            for child in node.iter(tag):
-                results.append(child)
-            return results
+    # Obtener texto formateado
+    try:
+        rendered_html = styler.render() if hasattr(styler, "render") else ""
+    except Exception:
+        rendered_html = ""
 
-        ths = find_all(root, "th")
-        headers = [th.text or "" for th in ths]
+    # Usar formato aplicado al exportar a excel-like dict
+    cell_text = []
+    for ri in range(n_rows):
+        row_txt = []
+        for ci, col in enumerate(df.columns):
+            v = df.iloc[ri, ci]
+            if pd.isna(v):
+                row_txt.append("—")
+            elif isinstance(v, float):
+                row_txt.append(f"{v:.1%}" if 0 <= abs(v) <= 1.5 else f"{v:,.1f}")
+            else:
+                row_txt.append(str(v))
+        cell_text.append(row_txt)
 
-        for tr in find_all(root, "tr"):
-            tds = list(tr.findall("td"))
-            if not tds: continue
-            row = []
-            for td in tds:
-                style_str = td.get("style", "")
-                bg, fg, bold = parse_inline_style(style_str)
-                text = "".join(td.itertext()).strip()
-                row.append((text, bg, fg, bold))
-            if row:
-                rows_data.append(row)
-    except ET.ParseError:
-        # Fallback: parsear con regex si ET falla
-        th_pat  = _re.compile(r'<th[^>]*>(.*?)</th>', _re.DOTALL)
-        tr_pat  = _re.compile(r'<tr[^>]*>(.*?)</tr>', _re.DOTALL)
-        td_pat  = _re.compile(r'<td([^>]*)>(.*?)</td>', _re.DOTALL)
-        sty_pat = _re.compile(r'style="([^"]*)"')
-
-        headers = [_re.sub(r'<[^>]+>', '', m).strip() for m in th_pat.findall(html)]
-
-        for tr_content in tr_pat.findall(html):
-            row = []
-            for attrs, content in td_pat.findall(tr_content):
-                sm = sty_pat.search(attrs)
-                style_str = sm.group(1) if sm else ""
-                bg, fg, bold = parse_inline_style(style_str)
-                text = _re.sub(r'<[^>]+>', '', content).strip()
-                row.append((text, bg, fg, bold))
-            if row:
-                rows_data.append(row)
-
-    if not rows_data:
-        # Último fallback: texto plano sin colores
-        df = styler.data
-        headers = list(df.columns)
-        rows_data = [[(str(v), "#FFFFFF", "#1A1A1A", False) for v in row]
-                     for row in df.values]
-
-    n_rows = len(rows_data)
-    n_cols = max(len(r) for r in rows_data) if rows_data else len(headers)
-
-    # ── 3. Calcular anchos de columna proporcionales al contenido ────
-    col_max_chars = [len(str(h)) for h in headers]
-    for row in rows_data:
-        for ci, (txt, *_) in enumerate(row):
-            if ci < len(col_max_chars):
-                col_max_chars[ci] = max(col_max_chars[ci], len(str(txt)))
-
-    total_chars   = sum(col_max_chars) or 1
-    fig_w         = max(8, min(20, total_chars * 0.18 + 1.0))
-    col_widths    = [c / total_chars for c in col_max_chars]
-
-    row_h   = 0.42
-    header_h = 0.52
-    fig_h   = header_h + row_h * n_rows + 0.2
+    # Dimensiones figura
+    col_width   = max(1.4, 9.0 / max(n_cols, 1))
+    row_height  = 0.45
+    fig_w       = max(8, col_width * n_cols + 0.5)
+    fig_h       = row_height * (n_rows + 1) + 0.3
 
     fig, ax = plt.subplots(figsize=(fig_w, fig_h), facecolor="white")
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, fig_h)
+    ax.set_xlim(0, n_cols)
+    ax.set_ylim(0, n_rows + 1)
     ax.axis("off")
 
-    # ── 4. Dibujar cabecera ──────────────────────────────────────────
-    x = 0.0
-    y_header = fig_h - header_h
-    for ci, (h, cw) in enumerate(zip(headers, col_widths)):
-        ax.add_patch(plt.Rectangle((x, y_header), cw, header_h,
-                     facecolor="#1A1A2E", edgecolor="white", linewidth=0.4,
-                     transform=ax.transData, clip_on=False))
-        ax.text(x + cw / 2, y_header + header_h / 2,
-                str(h), ha="center", va="center",
-                fontsize=7.5, fontweight="bold", color="white",
-                transform=ax.transData)
-        x += cw
+    # Cabecera
+    for ci, col in enumerate(df.columns):
+        ax.add_patch(plt.Rectangle((ci, n_rows), 1, 1,
+                     facecolor="#1A1A2E", edgecolor="white", linewidth=0.5))
+        ax.text(ci + 0.5, n_rows + 0.5, str(col),
+                ha="center", va="center", fontsize=8,
+                fontweight="bold", color="white", wrap=True)
 
-    # ── 5. Dibujar filas ─────────────────────────────────────────────
-    for ri, row in enumerate(rows_data):
-        y_row = fig_h - header_h - row_h * (ri + 1)
-        x = 0.0
-        default_bg = "#F8F8F8" if ri % 2 == 1 else "#FFFFFF"
-        for ci, cw in enumerate(col_widths):
-            if ci < len(row):
-                txt, bg, fg, bold = row[ci]
-            else:
-                txt, bg, fg, bold = "", default_bg, "#1A1A1A", False
+    # Celdas de datos
+    for ri in range(n_rows):
+        row_inv = n_rows - 1 - ri   # invertir para que fila 0 esté arriba
+        for ci in range(n_cols):
+            props   = style_map.get((ri, ci), "")
+            bg, fg, bold = parse_bg(props)
 
-            cell_bg = bg if bg != "#FFFFFF" else default_bg
-            ax.add_patch(plt.Rectangle((x, y_row), cw, row_h,
-                         facecolor=cell_bg, edgecolor="#DEDEDE", linewidth=0.3,
-                         transform=ax.transData, clip_on=False))
-            ax.text(x + cw / 2, y_row + row_h / 2,
-                    str(txt), ha="center", va="center",
-                    fontsize=7, fontweight="bold" if bold else "normal",
-                    color=fg, transform=ax.transData)
-            x += cw
+            # Color alterno si no hay color de fondo explícito
+            if bg == "#FFFFFF" and ri % 2 == 1:
+                bg = "#F5F5F5"
+
+            ax.add_patch(plt.Rectangle((ci, row_inv), 1, 1,
+                         facecolor=bg, edgecolor="#E0E0E0", linewidth=0.3))
+            txt = cell_text[ri][ci]
+            ax.text(ci + 0.5, row_inv + 0.5, txt,
+                    ha="center", va="center", fontsize=7.5,
+                    fontweight="bold" if bold else "normal",
+                    color=fg)
+
+    plt.tight_layout(pad=0.2)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="jpeg", facecolor="white",
+                bbox_inches="tight", dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
 
 def aplicar_filtro_ciudad(df, ciudad):
     if ciudad=="TODAS" or "ciudad" not in df.columns: return df
