@@ -99,13 +99,138 @@ def fig_to_buf(fig):
 def styler_to_jpg_buf(styler):
     """
     Convierte un pandas Styler a JPEG usando matplotlib.
-    Parsea el bloque <style> del HTML (IDs tipo #T_xxxx_rowR_colC)
-    para extraer colores y estilos exactos por celda.
+    Parsea el bloque <style> del HTML para extraer colores exactos por celda.
     No requiere Playwright, Chromium ni dataframe_image.
     """
     import re as _re
 
-    html = styler.to_html(index=False)
+    # Usar to_html() CON índice para que los IDs row/col coincidan con el style_map.
+    # El índice se detecta y se excluye del dibujo final.
+    html = styler.to_html()
+
+    # ── 1. Extraer style_map desde el bloque <style> ──────────────────
+    # Formato: #T_xxxx_rowR_colC { background-color: ...; color: ...; }
+    style_map = {}
+    style_block = _re.search(r'<style[^>]*>(.*?)</style>', html, _re.DOTALL)
+    if style_block:
+        css = style_block.group(1)
+        for selector_raw, props_raw in _re.findall(r'([^{}]+)\{([^{}]+)\}', css):
+            props = {}
+            for decl in props_raw.split(";"):
+                decl = decl.strip()
+                if ":" not in decl: continue
+                k, v = decl.split(":", 1)
+                props[k.strip()] = v.strip()
+            if not props: continue
+            for m in _re.finditer(r'_row(\d+)_col(\d+)', selector_raw):
+                style_map[(int(m.group(1)), int(m.group(2)))] = props
+
+    # ── 2. Detectar columnas de índice (para excluirlas del render) ───
+    # Las th del thead con class "blank" o "index_name" son columnas de índice
+    # Más robusto: detectar qué col_N son índice vs datos
+    index_cols = set()
+    for m in _re.finditer(r'<th[^>]*class="[^"]*\b(blank|index_name|row_heading)\b[^"]*"[^>]*>', html):
+        # Buscar col número en el id si lo tiene
+        id_m = _re.search(r'col(\d+)', m.group(0))
+        if id_m:
+            index_cols.add(int(id_m.group(1)))
+
+    # Cabeceras de datos (th con class col_heading, excluyendo índice)
+    headers = []
+    for m in _re.finditer(r'<th[^>]*class="[^"]*col_heading[^"]*"[^>]*id="[^"]*col(\d+)"[^>]*>\s*(.*?)\s*</th>', html, _re.DOTALL):
+        col_n = int(m.group(1))
+        if col_n not in index_cols:
+            headers.append((col_n, _re.sub(r'<[^>]+>', '', m.group(2)).strip()))
+
+    # Ordenar por col_n y quedarse solo con el texto
+    headers.sort(key=lambda x: x[0])
+    data_col_ids = [h[0] for h in headers]
+    header_texts = [h[1] for h in headers]
+
+    # ── 3. Extraer filas de datos ─────────────────────────────────────
+    rows_data = []
+    for tr in _re.findall(r'<tr>\s*(.*?)\s*</tr>', html, _re.DOTALL):
+        tds = _re.findall(
+            r'<td[^>]*id="[^"]*_row(\d+)_col(\d+)"[^>]*>\s*(.*?)\s*</td>',
+            tr, _re.DOTALL
+        )
+        if not tds: continue
+        # Mapear por col_id → solo columnas de datos
+        td_by_col = {}
+        for ri_s, ci_s, content in tds:
+            ri, ci = int(ri_s), int(ci_s)
+            text  = _re.sub(r'<[^>]+>', '', content).strip()
+            props = style_map.get((ri, ci), {})
+            bg    = props.get("background-color", "#FFFFFF")
+            fg    = props.get("color", "#1A1A1A")
+            bold  = props.get("font-weight", "") == "bold"
+            td_by_col[ci] = (text, bg, fg, bold)
+
+        row = [td_by_col.get(ci, ("", "#FFFFFF", "#1A1A1A", False))
+               for ci in data_col_ids]
+        if row:
+            rows_data.append(row)
+
+    n_rows = len(rows_data)
+    n_cols = len(header_texts)
+
+    if n_rows == 0 or n_cols == 0:
+        # Fallback sin colores
+        df = styler.data
+        header_texts = list(df.columns)
+        n_cols = len(header_texts)
+        rows_data = [[(str(v), "#FFFFFF", "#1A1A1A", False) for v in row]
+                     for row in df.values]
+        n_rows = len(rows_data)
+
+    # ── 4. Calcular anchos proporcionales al contenido ────────────────
+    col_max_chars = [len(str(h)) for h in header_texts]
+    for row in rows_data:
+        for ci, (txt, *_) in enumerate(row):
+            if ci < len(col_max_chars):
+                col_max_chars[ci] = max(col_max_chars[ci], len(str(txt)))
+
+    total_chars = sum(col_max_chars) or 1
+    col_widths  = [c / total_chars for c in col_max_chars]
+    fig_w       = max(8, min(24, total_chars * 0.19 + 1.0))
+    row_h       = 0.44
+    header_h    = 0.54
+    fig_h       = header_h + row_h * n_rows + 0.2
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), facecolor="white")
+    ax.set_xlim(0, 1); ax.set_ylim(0, fig_h); ax.axis("off")
+
+    # ── 5. Cabecera ───────────────────────────────────────────────────
+    x = 0.0; y_hdr = fig_h - header_h
+    for h, cw in zip(header_texts, col_widths):
+        ax.add_patch(plt.Rectangle((x, y_hdr), cw, header_h,
+                     facecolor="#1A1A2E", edgecolor="white", linewidth=0.5))
+        ax.text(x + cw/2, y_hdr + header_h/2, str(h),
+                ha="center", va="center", fontsize=7.5,
+                fontweight="bold", color="white")
+        x += cw
+
+    # ── 6. Filas ──────────────────────────────────────────────────────
+    for ri, row in enumerate(rows_data):
+        y_row = fig_h - header_h - row_h * (ri + 1)
+        x = 0.0
+        def_bg = "#F5F5F5" if ri % 2 == 1 else "#FFFFFF"
+        for ci, cw in enumerate(col_widths):
+            txt, bg, fg, bold = row[ci] if ci < len(row) else ("", def_bg, "#1A1A1A", False)
+            cell_bg = bg if bg not in ("#FFFFFF", "", "white") else def_bg
+            ax.add_patch(plt.Rectangle((x, y_row), cw, row_h,
+                         facecolor=cell_bg, edgecolor="#E0E0E0", linewidth=0.3))
+            ax.text(x + cw/2, y_row + row_h/2, str(txt),
+                    ha="center", va="center", fontsize=7,
+                    fontweight="bold" if bold else "normal", color=fg)
+            x += cw
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="jpeg", facecolor="white",
+                bbox_inches="tight", dpi=180)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
 
     # ── 1. Extraer mapa de estilos desde el bloque <style> ───────────
     # Formato: #T_xxxx_rowR_colC { background-color: #xxx; color: yyy; }
