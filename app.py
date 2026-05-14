@@ -79,10 +79,10 @@ def cargar_datos():
         "08_isc_mensual_aps.csv"     : "isc_aps",
         "09_tre_mensual_aps.csv"     : "tre_aps",
         "10_atributos_aps.csv"       : "atrib_aps",
+        "12_verbalizaciones.csv"     : "verbaliz",
     }
     ARCHIVOS_CIUDAD = {
         "11_atributos_especiales.csv": "especiales",
-        "12_verbalizaciones.csv"     : "verbaliz",
     }
     TODOS_ARCHIVOS = {**ARCHIVOS_PERIODO, **ARCHIVOS_CIUDAD}
 

@@ -138,6 +138,11 @@ def extraer_mes_anio(nombre):
 def calcular_fytd(mes, anio):
     return f"FYTD {anio}" if MESES_NUM.get(mes,0) >= 4 else f"FYTD {int(anio)-1}"
 
+def anio_desde_fytd_mes(fytd_str, mes_str):
+    """Reconstruye el año calendario a partir de FYTD y mes (inverso de calcular_fytd)."""
+    fytd_year = int(fytd_str.replace("FYTD ", "").strip())
+    return str(fytd_year) if MESES_NUM.get(mes_str, 0) >= 4 else str(fytd_year + 1)
+
 def calcular_orden_mes(mes, anio):
     return int(anio)*100 + MESES_NUM.get(mes,0)
 
@@ -505,27 +510,15 @@ with st.columns([1,2,1])[1]:
             st.error("❌ Selecciona la Ciudad (Paso 0) antes de guardar.")
         elif not df_verb_editado.empty:
             ciudad_slug = CIUDADES[ciudad_seleccionada]
+            anio_verb   = anio_desde_fytd_mes(fytd_verb, mes_verb)
             df_verb_editado['fytd']   = fytd_verb
             df_verb_editado['mes']    = mes_verb
             df_verb_editado['ciudad'] = ciudad_verb
 
-            blob_verb = f"datos_procesados/{ciudad_slug}/12_verbalizaciones.csv"
-            df_v_existente = download_df_from_gcs(blob_verb)
-            if df_v_existente is not None:
-                if 'ciudad' not in df_v_existente.columns:
-                    df_v_existente['ciudad'] = ciudad_seleccionada
-                df_v_existente = df_v_existente[~(
-                    (df_v_existente['fytd'] == fytd_verb) &
-                    (df_v_existente['mes'] == mes_verb) &
-                    (df_v_existente['ciudad'] == ciudad_verb)
-                )]
-                df_c_v = pd.concat([df_v_existente, df_verb_editado], ignore_index=True)
-            else:
-                df_c_v = df_verb_editado
-
-            df_c_v.to_csv(RUTA_VERBALIZACIONES, index=False)
-            upload_dealer(str(RUTA_VERBALIZACIONES), "12_verbalizaciones.csv", ciudad_slug)
-            st.success(f"✅ Verbalizaciones de {ciudad_seleccionada} ({mes_verb} {fytd_verb}) guardadas.")
+            # Guardar como archivo de período (mismo esquema que archivos 01-10)
+            df_verb_editado.to_csv(RUTA_VERBALIZACIONES, index=False)
+            upload_periodo(str(RUTA_VERBALIZACIONES), "12_verbalizaciones.csv", ciudad_slug, mes_verb, anio_verb)
+            st.success(f"✅ Verbalizaciones de {ciudad_seleccionada} — {mes_verb} {anio_verb} guardadas.")
         else:
             st.warning("⚠️ La tabla está vacía. Pega los datos antes de guardar.")
 
