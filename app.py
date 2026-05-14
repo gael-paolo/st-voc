@@ -1830,7 +1830,8 @@ def render_verbalizaciones():
     ax1.axvline(75, color=COLOR_OBJETIVO, linestyle='--', linewidth=1.5, zorder=2, alpha=0.6)
 
     colors  = ['#D32F2F' if s < 60 else '#FF9800' if s < 85 else '#388E3C' for s in df_s1["sat_neta"]]
-    sizes   = df_s1["menciones_pct"] * 70 + 120
+    max_pct = df_s1["menciones_pct"].max() or 1
+    sizes   = (df_s1["menciones_pct"] / max_pct) * 500 + 80
     ax1.scatter(df_s1["sat_neta"], y_pos, s=sizes, c=colors, alpha=0.9,
                 edgecolors="white", linewidth=1.0, zorder=3)
     for i, s in enumerate(df_s1["sat_neta"]):
