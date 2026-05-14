@@ -1831,12 +1831,12 @@ def render_verbalizaciones():
 
     colors  = ['#D32F2F' if s < 60 else '#FF9800' if s < 85 else '#388E3C' for s in df_s1["sat_neta"]]
     max_pct = df_s1["menciones_pct"].max() or 1
-    sizes   = (df_s1["menciones_pct"] / max_pct) * 500 + 80
+    sizes   = (df_s1["menciones_pct"] / max_pct) * 900 + 300
     ax1.scatter(df_s1["sat_neta"], y_pos, s=sizes, c=colors, alpha=0.9,
                 edgecolors="white", linewidth=1.0, zorder=3)
     for i, s in enumerate(df_s1["sat_neta"]):
         ax1.text(s, i, f"{s:.0f}%", ha='center', va='center',
-                 fontsize=8, color="white", fontweight='bold', zorder=4)
+                 fontsize=9, color="white", fontweight='bold', zorder=4)
 
     ax1.set_yticks(y_pos)
     ax1.set_yticklabels([textwrap.fill(x, 30) for x in df_s1["Sub-Categoría"]],
