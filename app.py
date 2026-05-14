@@ -45,6 +45,32 @@ from google.cloud import storage
 from google.oauth2 import service_account
 import io
 
+_MESES_NUM = {'Ene':1,'Feb':2,'Mar':3,'Abr':4,'May':5,'Jun':6,
+              'Jul':7,'Ago':8,'Sep':9,'Oct':10,'Nov':11,'Dic':12}
+
+def _reconstruir_mes_anio(df):
+    """Reconstruye mes_anio y orden_mes en verbalizaciones que sólo tienen fytd+mes."""
+    if df.empty:
+        return df
+    df = df.copy()
+    mask = df["mes_anio"].isna() | df["mes_anio"].astype(str).str.contains(r"\?", na=True)
+    if not mask.any():
+        return df
+
+    def _anio(row):
+        try:
+            fytd_y = int(str(row["fytd"]).replace("FYTD", "").strip())
+            mes_n  = _MESES_NUM.get(str(row["mes"]).strip().capitalize(), 0)
+            return fytd_y if mes_n >= 4 else fytd_y + 1
+        except Exception:
+            return 0
+
+    df.loc[mask, "mes_anio"]  = df[mask].apply(
+        lambda r: f"{str(r['mes']).strip().capitalize()} {_anio(r)}", axis=1)
+    df.loc[mask, "orden_mes"] = df[mask].apply(
+        lambda r: _anio(r) * 100 + _MESES_NUM.get(str(r["mes"]).strip().capitalize(), 0), axis=1)
+    return df
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def cargar_datos():
     """
@@ -130,6 +156,12 @@ def cargar_datos():
     for clave, lista in acum.items():
         if lista:
             df_concat = pd.concat(lista, ignore_index=True)
+            if clave == "verbaliz":
+                if "mes_anio" not in df_concat.columns:
+                    df_concat["mes_anio"] = np.nan
+                if "orden_mes" not in df_concat.columns:
+                    df_concat["orden_mes"] = np.nan
+                df_concat = _reconstruir_mes_anio(df_concat)
             # Deduplicar si hay overlap entre estructura nueva y antigua
             if clave in ("isc_mensual", "tre_mensual"):
                 df_concat = df_concat.drop_duplicates(
@@ -1688,12 +1720,13 @@ def render_verbalizaciones():
     if df_base.empty:
         st.info(f"Sin verbalizaciones para {CIUDAD}."); return
 
-    # meses_de requiere mes_anio y orden_mes — ambos se guardan desde preproc v3
-    # Para datos anteriores sin esas columnas, reconstruirlas si faltan
-    if "mes_anio" not in df_base.columns or df_base["mes_anio"].isna().all():
-        df_base["mes_anio"] = df_base["mes"].astype(str) + " ?"
-    if "orden_mes" not in df_base.columns or df_base["orden_mes"].isna().all():
+    # mes_anio y orden_mes ya vienen reconstruidos desde cargar_datos()
+    # Verificación defensiva por si algún registro escapa la reconstrucción
+    if "mes_anio" not in df_base.columns:
+        df_base["mes_anio"] = np.nan
+    if "orden_mes" not in df_base.columns:
         df_base["orden_mes"] = 0
+    df_base = _reconstruir_mes_anio(df_base)
 
     c1, c2, c3, c4 = st.columns([1.5, 1.5, 1, 1])
     with c1:
