@@ -1822,25 +1822,26 @@ def render_verbalizaciones():
     st.markdown(titulo_grafica("Impacto Estratégico de Verbalizaciones"), unsafe_allow_html=True)
 
     df_s1 = df_graficos.sort_values("menciones_pct", ascending=True)
-    fig1, ax1 = plt.subplots(figsize=(10, max(6, len(df_s1) * 0.45)), facecolor="white")
-    y_pos = np.arange(len(df_s1))
+    n_items = len(df_s1)
+    fig1, ax1 = plt.subplots(figsize=(8, max(3.5, n_items * 0.38)), facecolor="white")
+    y_pos = np.arange(n_items)
 
     ax1.hlines(y=y_pos, xmin=0, xmax=100, color='#EEEEEE', linewidth=1, zorder=1)
     ax1.axvline(75, color=COLOR_OBJETIVO, linestyle='--', linewidth=1.5, zorder=2, alpha=0.6)
 
     colors  = ['#D32F2F' if s < 60 else '#FF9800' if s < 85 else '#388E3C' for s in df_s1["sat_neta"]]
-    sizes   = df_s1["menciones_pct"] * 110 + 200
+    sizes   = df_s1["menciones_pct"] * 70 + 120
     ax1.scatter(df_s1["sat_neta"], y_pos, s=sizes, c=colors, alpha=0.9,
-                edgecolors="white", linewidth=1.2, zorder=3)
+                edgecolors="white", linewidth=1.0, zorder=3)
     for i, s in enumerate(df_s1["sat_neta"]):
         ax1.text(s, i, f"{s:.0f}%", ha='center', va='center',
-                 fontsize=9.5, color="white", fontweight='bold', zorder=4)
+                 fontsize=8, color="white", fontweight='bold', zorder=4)
 
     ax1.set_yticks(y_pos)
-    ax1.set_yticklabels([textwrap.fill(x, 28) for x in df_s1["Sub-Categoría"]],
-                        fontsize=11, fontweight='bold', color="#1A1A2E")
+    ax1.set_yticklabels([textwrap.fill(x, 30) for x in df_s1["Sub-Categoría"]],
+                        fontsize=9, fontweight='bold', color="#1A1A2E")
     ax1.set_xticks([0, 20, 40, 60, 80, 100])
-    ax1.set_xlabel("Satisfacción Neta (%)", fontsize=12, fontweight='bold', labelpad=10)
+    ax1.set_xlabel("Satisfacción Neta (%)", fontsize=10, fontweight='bold', labelpad=8)
     ax1.set_xlim(-5, 105)
     ax1.xaxis.set_major_formatter(mtick.PercentFormatter(100.0))
     ax1.spines['top'].set_visible(False)
