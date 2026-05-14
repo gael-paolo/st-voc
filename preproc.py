@@ -515,6 +515,10 @@ with st.columns([1,2,1])[1]:
             df_verb_editado['mes']    = mes_verb
             df_verb_editado['ciudad'] = ciudad_verb
 
+            # Agregar mes_anio y orden_mes para que app.py pueda usar meses_de()
+            df_verb_editado['mes_anio']  = f"{mes_verb} {anio_verb}"
+            df_verb_editado['orden_mes'] = int(anio_verb) * 100 + MESES_NUM.get(mes_verb, 0)
+
             # Guardar como archivo de período (mismo esquema que archivos 01-10)
             df_verb_editado.to_csv(RUTA_VERBALIZACIONES, index=False)
             upload_periodo(str(RUTA_VERBALIZACIONES), "12_verbalizaciones.csv", ciudad_slug, mes_verb, anio_verb)

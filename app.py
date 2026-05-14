@@ -1678,40 +1678,73 @@ def render_pendientes():
 # ==============================================================================
 def render_verbalizaciones():
     st.markdown("<div class='seccion-titulo'>Análisis de Verbalizaciones del Cliente</div>",unsafe_allow_html=True)
-    
+
     if D["verbaliz"].empty:
         st.info("No hay datos de verbalizaciones cargados. Ve al preprocesador para subirlos."); return
 
-    c1,c2,c3,c4 = st.columns([1.5, 1.5, 1, 1])
-    with c1: fytd_sel = st.selectbox("Periodo:", todos_fytd, key="v_fytd_dash")
+    # Pre-filtrar por ciudad antes de calcular meses disponibles
+    df_base = aplicar_filtro_ciudad(D["verbaliz"].copy(), CIUDAD)
+
+    if df_base.empty:
+        st.info(f"Sin verbalizaciones para {CIUDAD}."); return
+
+    # meses_de requiere mes_anio y orden_mes — ambos se guardan desde preproc v3
+    # Para datos anteriores sin esas columnas, reconstruirlas si faltan
+    if "mes_anio" not in df_base.columns or df_base["mes_anio"].isna().all():
+        df_base["mes_anio"] = df_base["mes"].astype(str) + " ?"
+    if "orden_mes" not in df_base.columns or df_base["orden_mes"].isna().all():
+        df_base["orden_mes"] = 0
+
+    c1, c2, c3, c4 = st.columns([1.5, 1.5, 1, 1])
+    with c1:
+        fytd_sel = st.selectbox("Periodo:", todos_fytd, key="v_fytd_dash")
+
+    # Meses disponibles directamente desde verbalizaciones, no desde atributos
+    mm = meses_de(df_base, fytd_sel)
+
     with c2:
-        mm = meses_de(D["atributos"], fytd_sel, CIUDAD)
         mes_sel = st.selectbox("Mes/Año:", ["TODOS"] + mm if mm else ["TODOS"], key="v_mes_dash")
-    
-    if "ver_acum" not in st.session_state: st.session_state.ver_acum = False
+
+    # Resetear acum si cambia el FYTD
+    if st.session_state.get("v_fytd_prev") != fytd_sel:
+        st.session_state.ver_acum = False
+        st.session_state.v_fytd_prev = fytd_sel
+
+    if "ver_acum" not in st.session_state:
+        st.session_state.ver_acum = False
+
     with c3:
-        st.markdown("<div style='margin-top:28px'></div>",unsafe_allow_html=True)
-        if st.button("Cargar",key="v_btn",use_container_width=True,type="primary"):
-            st.session_state.ver_acum = False; st.rerun()
+        st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
+        if st.button("Cargar", key="v_btn", use_container_width=True, type="primary"):
+            st.session_state.ver_acum = False
+            st.rerun()
     with c4:
-        st.markdown("<div style='margin-top:28px'></div>",unsafe_allow_html=True)
-        if st.button("ACUM",key="v_btn_acum",use_container_width=True):
-            st.session_state.ver_acum = True; st.rerun()
+        st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
+        if st.button("ACUM", key="v_btn_acum", use_container_width=True):
+            st.session_state.ver_acum = True
+            st.rerun()
 
-    df = D["verbaliz"].copy()
-    if mes_sel == "TODOS": meses_proc = mm
+    # Determinar meses a incluir
+    if mes_sel == "TODOS":
+        meses_proc = mm
     elif st.session_state.ver_acum:
-        if mes_sel in mm:
-            idx = mm.index(mes_sel)
-            meses_proc = mm[:idx+1]
-        else: meses_proc = []
-    else: meses_proc = [mes_sel]
+        meses_proc = mm[:mm.index(mes_sel) + 1] if mes_sel in mm else []
+    else:
+        meses_proc = [mes_sel]
 
-    meses_cortos = [str(m).split()[0].strip().capitalize() for m in meses_proc]
-    fytd_str = str(fytd_sel).strip().upper()
-    df = df[(df["fytd"] == fytd_str) & (df["mes"].isin(meses_cortos)) & (df["ciudad"] == CIUDAD)]
+    if not meses_proc:
+        st.warning("Sin datos para esta selección."); return
 
-    if df.empty: st.warning("Sin datos para esta selección."); return
+    # Filtrar por FYTD y meses (usando mes_anio)
+    df = df_base[
+        (df_base["fytd"] == fytd_sel) &
+        (df_base["mes_anio"].isin(meses_proc))
+    ].copy()
+
+    if df.empty:
+        st.warning("Sin datos para esta selección."); return
+
+    label_periodo = f"ACUM hasta {mes_sel}" if st.session_state.ver_acum and mes_sel != "TODOS" else mes_sel
 
     def clean_pct(x):
         try:
@@ -1719,90 +1752,103 @@ def render_verbalizaciones():
             return float(str(x).split('%')[0].strip())
         except: return 0.0
 
-    df["sat_neta"] = df["SATISFACCIÓN NETA"].apply(clean_pct)
+    df["sat_neta"]      = df["SATISFACCIÓN NETA"].apply(clean_pct)
     df["menciones_pct"] = df["Comentarios relacionados"].apply(clean_pct)
-    
-    df_plot = df.groupby("Sub-Categoría").agg({"sat_neta": "mean", "menciones_pct": "sum", "Categoría": "first"}).reset_index()
+
+    df_plot = df.groupby("Sub-Categoría").agg(
+        sat_neta=("sat_neta", "mean"),
+        menciones_pct=("menciones_pct", "sum"),
+        Categoría=("Categoría", "first")
+    ).reset_index()
     df_graficos = df_plot[df_plot["menciones_pct"] > 0].reset_index(drop=True)
-    
-    if df_graficos.empty: 
+
+    if df_graficos.empty:
         st.info("No hay menciones registradas (mayores a 0%) en este periodo."); return
 
     def titulo_grafica(texto):
-        return f"""
-        <div style='text-align:center; margin-bottom:15px;'>
-            <div style='font-family:"Barlow Condensed", sans-serif; font-size:22px; font-weight:900; color:#1A1A2E; text-transform:uppercase; letter-spacing:1px;'>
-                {texto}
-            </div>
-            <div style='width:50px; height:3px; background:#FFD600; margin:4px auto 0;'></div>
-        </div>
-        """
+        return (
+            "<div style='text-align:center;margin-bottom:15px'>"
+            f"<div style='font-family:\"Barlow Condensed\",sans-serif;font-size:22px;"
+            f"font-weight:900;color:#1A1A2E;text-transform:uppercase;letter-spacing:1px'>{texto}</div>"
+            "<div style='width:50px;height:3px;background:#FFD600;margin:4px auto 0'></div></div>"
+        )
 
     # =========================================================================
     # GRÁFICA 1: MAPA DE IMPACTO
     # =========================================================================
     st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
     st.markdown(titulo_grafica("Impacto Estratégico de Verbalizaciones"), unsafe_allow_html=True)
-    
-    df_plot_sorted = df_graficos.sort_values("menciones_pct", ascending=True)
-    altura_graf = max(6, len(df_plot_sorted) * 0.45)
-    
-    fig, ax = plt.subplots(figsize=(10, altura_graf), facecolor="white")
-    y_pos = np.arange(len(df_plot_sorted))
-    ax.hlines(y=y_pos, xmin=0, xmax=100, color='#EEEEEE', linestyle='-', linewidth=1, zorder=1)
-    ax.axvline(75, color=COLOR_OBJETIVO, linestyle='--', linewidth=1.5, zorder=2, alpha=0.6)
-    
-    colors = ['#D32F2F' if s < 60 else '#FF9800' if s < 85 else '#388E3C' for s in df_plot_sorted["sat_neta"]]
-    sizes = df_plot_sorted["menciones_pct"] * 110 + 200 
-    ax.scatter(df_plot_sorted["sat_neta"], y_pos, s=sizes, c=colors, alpha=0.9, edgecolors="white", linewidth=1.2, zorder=3)
-    
-    for i, s in enumerate(df_plot_sorted["sat_neta"]):
-        ax.text(s, i, f"{s:.0f}%", ha='center', va='center', fontsize=9.5, color="white", fontweight='bold', zorder=4)
 
-    ax.set_yticks(y_pos)
-    ax.set_yticklabels([textwrap.fill(x, 28) for x in df_plot_sorted["Sub-Categoría"]], fontsize=11, fontweight='bold', color="#1A1A2E")
-    ax.set_xticks([0, 20, 40, 60, 80, 100])
-    ax.set_xlabel("Satisfacción Neta (%)", fontsize=12, fontweight='bold', labelpad=10)
-    ax.set_xlim(-5, 105)
-    ax.xaxis.set_major_formatter(mtick.PercentFormatter(100.0))
-    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False); ax.spines['left'].set_visible(False)
-    ax.tick_params(axis='y', length=0)
-    
+    df_s1 = df_graficos.sort_values("menciones_pct", ascending=True)
+    fig1, ax1 = plt.subplots(figsize=(10, max(6, len(df_s1) * 0.45)), facecolor="white")
+    y_pos = np.arange(len(df_s1))
+
+    ax1.hlines(y=y_pos, xmin=0, xmax=100, color='#EEEEEE', linewidth=1, zorder=1)
+    ax1.axvline(75, color=COLOR_OBJETIVO, linestyle='--', linewidth=1.5, zorder=2, alpha=0.6)
+
+    colors  = ['#D32F2F' if s < 60 else '#FF9800' if s < 85 else '#388E3C' for s in df_s1["sat_neta"]]
+    sizes   = df_s1["menciones_pct"] * 110 + 200
+    ax1.scatter(df_s1["sat_neta"], y_pos, s=sizes, c=colors, alpha=0.9,
+                edgecolors="white", linewidth=1.2, zorder=3)
+    for i, s in enumerate(df_s1["sat_neta"]):
+        ax1.text(s, i, f"{s:.0f}%", ha='center', va='center',
+                 fontsize=9.5, color="white", fontweight='bold', zorder=4)
+
+    ax1.set_yticks(y_pos)
+    ax1.set_yticklabels([textwrap.fill(x, 28) for x in df_s1["Sub-Categoría"]],
+                        fontsize=11, fontweight='bold', color="#1A1A2E")
+    ax1.set_xticks([0, 20, 40, 60, 80, 100])
+    ax1.set_xlabel("Satisfacción Neta (%)", fontsize=12, fontweight='bold', labelpad=10)
+    ax1.set_xlim(-5, 105)
+    ax1.xaxis.set_major_formatter(mtick.PercentFormatter(100.0))
+    ax1.spines['top'].set_visible(False)
+    ax1.spines['right'].set_visible(False)
+    ax1.spines['left'].set_visible(False)
+    ax1.tick_params(axis='y', length=0)
     plt.tight_layout()
-    st.pyplot(fig)
-    
-    st.download_button("Descargar Mapa de Impacto", data=fig_to_buf(fig).getvalue(), 
-                       file_name=f"Impacto_Verbalizaciones_{mes_sel}.jpg", mime="image/jpeg", key="dl_verb_1")
+
+    buf1 = fig_to_buf(fig1)
+    st.image(buf1, use_container_width=True)
+    st.download_button("Descargar Mapa de Impacto",
+                       data=buf1.getvalue(),
+                       file_name=f"Impacto_Verbalizaciones_{label_periodo}.jpg",
+                       mime="image/jpeg", key="dl_verb_1")
     st.markdown("</div>", unsafe_allow_html=True)
 
     # =========================================================================
-    # GRÁFICA 2: TOP TEMAS
+    # GRÁFICA 2: RANKING DE TEMAS
     # =========================================================================
     st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
     st.markdown(titulo_grafica("Ranking de Temas más comentados"), unsafe_allow_html=True)
-    
-    df_top = df_graficos.sort_values("menciones_pct", ascending=True).tail(12)
-    fig2, ax2 = plt.subplots(figsize=(10, 8), facecolor="white")
-    bar_colors = ['#D32F2F' if s < 75 else '#388E3C' for s in df_top["sat_neta"]]
-    bars = ax2.barh(df_top["Sub-Categoría"], df_top["menciones_pct"], color=bar_colors, alpha=0.8)
-    
-    for bar in bars:
-        ax2.text(bar.get_width() + 0.3, bar.get_y() + bar.get_height()/2, 
-                 f'{bar.get_width():.1f}%', va='center', fontsize=11, fontweight='bold', color="#1A1A2E")
 
-    max_val = df_top["menciones_pct"].max()
-    ax2.set_xlim(0, max_val + (max_val * 0.18))
-    ax2.spines['top'].set_visible(False); ax2.spines['right'].set_visible(False)
-    ax2.set_yticks(np.arange(len(df_top)))
-    ax2.set_yticklabels([textwrap.fill(x, 28) for x in df_top["Sub-Categoría"]], fontsize=11, fontweight='bold', color="#1A1A2E")
-    
+    df_s2 = df_graficos.sort_values("menciones_pct", ascending=True).tail(12)
+    fig2, ax2 = plt.subplots(figsize=(10, 8), facecolor="white")
+    bar_colors = ['#D32F2F' if s < 75 else '#388E3C' for s in df_s2["sat_neta"]]
+    bars = ax2.barh(df_s2["Sub-Categoría"], df_s2["menciones_pct"], color=bar_colors, alpha=0.8)
+
+    for bar in bars:
+        ax2.text(bar.get_width() + 0.3, bar.get_y() + bar.get_height() / 2,
+                 f'{bar.get_width():.1f}%', va='center', fontsize=11,
+                 fontweight='bold', color="#1A1A2E")
+
+    max_val = df_s2["menciones_pct"].max() or 1
+    ax2.set_xlim(0, max_val * 1.18)
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
+    ax2.set_yticks(np.arange(len(df_s2)))
+    ax2.set_yticklabels([textwrap.fill(x, 28) for x in df_s2["Sub-Categoría"]],
+                        fontsize=11, fontweight='bold', color="#1A1A2E")
     plt.tight_layout()
-    st.pyplot(fig2)
-    
-    st.download_button("Descargar Ranking de Temas", data=fig_to_buf(fig2).getvalue(), 
-                       file_name=f"Ranking_Verbalizaciones_{mes_sel}.jpg", mime="image/jpeg", key="dl_verb_2")
+
+    buf2 = fig_to_buf(fig2)
+    st.image(buf2, use_container_width=True)
+    st.download_button("Descargar Ranking de Temas",
+                       data=buf2.getvalue(),
+                       file_name=f"Ranking_Verbalizaciones_{label_periodo}.jpg",
+                       mime="image/jpeg", key="dl_verb_2")
     st.markdown("</div>", unsafe_allow_html=True)
-\
+
+
 # ==============================================================================
 # SECCIÓN 7: PERFIL APS
 # ==============================================================================
