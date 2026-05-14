@@ -53,6 +53,11 @@ def _reconstruir_mes_anio(df):
     if df.empty:
         return df
     df = df.copy()
+
+    # Forzar dtype object para poder asignar strings sin conflicto de tipos
+    df["mes_anio"]  = df["mes_anio"].astype(object)
+    df["orden_mes"] = df["orden_mes"].astype(object)
+
     mask = df["mes_anio"].isna() | df["mes_anio"].astype(str).str.contains(r"\?", na=True)
     if not mask.any():
         return df
@@ -65,10 +70,14 @@ def _reconstruir_mes_anio(df):
         except Exception:
             return 0
 
-    df.loc[mask, "mes_anio"]  = df[mask].apply(
-        lambda r: f"{str(r['mes']).strip().capitalize()} {_anio(r)}", axis=1)
-    df.loc[mask, "orden_mes"] = df[mask].apply(
-        lambda r: _anio(r) * 100 + _MESES_NUM.get(str(r["mes"]).strip().capitalize(), 0), axis=1)
+    reconstruido = df[mask].apply(
+        lambda r: pd.Series({
+            "mes_anio" : f"{str(r['mes']).strip().capitalize()} {_anio(r)}",
+            "orden_mes": _anio(r) * 100 + _MESES_NUM.get(str(r["mes"]).strip().capitalize(), 0),
+        }), axis=1
+    )
+    df.loc[mask, "mes_anio"]  = reconstruido["mes_anio"]
+    df.loc[mask, "orden_mes"] = reconstruido["orden_mes"]
     return df
 
 @st.cache_data(ttl=3600, show_spinner=False)
