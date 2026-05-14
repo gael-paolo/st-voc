@@ -1,11 +1,16 @@
 # ==============================================================================
-# PREPROCESADOR VoC — App 1  (v2)
+# PREPROCESADOR VoC — App 1  (v3)
+# Estructura GCS: datos_procesados/{dealer_slug}/{YYYY}_{Mes}/archivo.csv
+#                 datos_procesados/{dealer_slug}/11_atributos_especiales.csv
+#                 datos_procesados/{dealer_slug}/12_verbalizaciones.csv
+#                 datos_procesados/INFO_BASE.xlsx   (global)
+#                 datos_procesados/07_objetivos.csv (global)
 # ==============================================================================
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-import os, re
+import os, re, io
 import unicodedata
 from pathlib import Path
 
@@ -15,19 +20,72 @@ from google.oauth2 import service_account
 # --- CONFIGURACIÓN ---
 BUCKET_NAME = "bk_voc"
 
+DEALERS = {
+    "Centro Nacional de Servicio": "centro_nacional",
+    "El Alto"                    : "el_alto",
+    "Express"                    : "express",
+}
+
 # --- AUTENTICACIÓN GCP vía st.secrets ---
 credentials_dict = st.secrets["gcp_service_account"]
 credentials = service_account.Credentials.from_service_account_info(credentials_dict)
 
-def upload_to_gcs(file_path, filename, folder):
-    client = storage.Client(credentials=credentials)
-    bucket = client.bucket(BUCKET_NAME)
-    blob = bucket.blob(f"{folder}{filename}")
-    blob.upload_from_filename(file_path)
+# ---------------------------------------------------------------------------
+# Funciones GCS
+# ---------------------------------------------------------------------------
+def _gcs_client():
+    return storage.Client(credentials=credentials)
 
+def upload_to_gcs(local_path, blob_path):
+    """Sube un archivo local a la ruta exacta de blob en el bucket."""
+    bucket = _gcs_client().bucket(BUCKET_NAME)
+    bucket.blob(blob_path).upload_from_filename(local_path)
+
+def upload_periodo(local_path, filename, dealer_slug, mes, anio):
+    """Sube a datos_procesados/{dealer_slug}/{YYYY}_{Mes}/filename."""
+    blob_path = f"datos_procesados/{dealer_slug}/{anio}_{mes}/{filename}"
+    upload_to_gcs(local_path, blob_path)
+
+def upload_dealer(local_path, filename, dealer_slug):
+    """Sube a datos_procesados/{dealer_slug}/filename (acumulado de dealer)."""
+    blob_path = f"datos_procesados/{dealer_slug}/{filename}"
+    upload_to_gcs(local_path, blob_path)
+
+def download_df_from_gcs(blob_path):
+    """Descarga un blob CSV y retorna DataFrame; None si no existe."""
+    bucket = _gcs_client().bucket(BUCKET_NAME)
+    blob = bucket.blob(blob_path)
+    if blob.exists():
+        data = blob.download_as_bytes()
+        return pd.read_csv(io.BytesIO(data), low_memory=False)
+    return None
+
+def listar_periodos_dealer(dealer_slug):
+    """Lista los subdirectorios de período disponibles en GCS para un dealer."""
+    client = _gcs_client()
+    prefix = f"datos_procesados/{dealer_slug}/"
+    blobs = client.list_blobs(BUCKET_NAME, prefix=prefix, delimiter="/")
+    # consumir blobs para que se pueblen los prefixes
+    list(blobs)
+    periodos = []
+    for p in blobs.prefixes:
+        parte = p.rstrip("/").split("/")[-1]
+        periodos.append(parte)
+    return sorted(periodos)
+
+def estado_gcs_todos_dealers():
+    """Retorna dict {dealer_slug: [periodos]} con lo que hay en GCS."""
+    client = _gcs_client()
+    resumen = {}
+    for slug in DEALERS.values():
+        periodos = listar_periodos_dealer(slug)
+        resumen[slug] = periodos
+    return resumen
+
+# ---------------------------------------------------------------------------
 st.set_page_config(page_title="VoC Preprocesador", page_icon="⚙️", layout="wide")
 
-CARPETA_SALIDA  = Path("datos_procesados")
+CARPETA_SALIDA = Path("datos_procesados")
 CARPETA_SALIDA.mkdir(exist_ok=True)
 
 RUTA_ISC_BASE    = CARPETA_SALIDA / "01_isc_base.csv"
@@ -42,6 +100,7 @@ RUTA_TRE_APS     = CARPETA_SALIDA / "09_tre_mensual_aps.csv"
 RUTA_ATRIB_APS   = CARPETA_SALIDA / "10_atributos_aps.csv"
 RUTA_ESPECIALES  = CARPETA_SALIDA / "11_atributos_especiales.csv"
 RUTA_VERBALIZACIONES = CARPETA_SALIDA / "12_verbalizaciones.csv"
+
 ATTR_ESCALA = {
     31:'Recepcion del vehiculo', 33:'Facilidad para realizar la cita',
     34:'Rapidez en recepcion', 35:'Disposicion del asesor',
@@ -136,18 +195,20 @@ def obtener_mapeo_completo(df_aps, mes, anio):
         sub = df_aps[df_aps['Periodo'] == df_aps['Periodo'].dropna().iloc[-1]]
     return sub[['APS','Dealer','Ciudad']].drop_duplicates()
 
-def append_csv(ruta, df_nuevo, claves_dedup):
+def guardar_csv(ruta, df):
+    """Guarda DataFrame en CSV local."""
+    df.to_csv(ruta, index=False)
+
+def save_global_csv(ruta, df_nuevo, clave_dedup):
+    """Para 07_objetivos: acumula localmente y sube a raíz global."""
     if ruta.exists():
         df_e = pd.read_csv(ruta)
         df_c = pd.concat([df_e, df_nuevo], ignore_index=True)
-        df_c = df_c.drop_duplicates(subset=claves_dedup, keep='last')
+        df_c = df_c.drop_duplicates(subset=clave_dedup, keep='last')
     else:
         df_c = df_nuevo.copy()
     df_c.to_csv(ruta, index=False)
-    
-    upload_to_gcs(str(ruta), ruta.name, "datos_procesados/")
-    
-    return len(df_c)
+    upload_to_gcs(str(ruta), f"datos_procesados/{ruta.name}")
 
 def calc_attr_score(vals, es_binario):
     datos = vals.dropna()
@@ -163,33 +224,31 @@ def isc_pct(g):
     return (c - i16*2 - i78)/c if c > 0 else np.nan
 
 def normalizar_texto(texto):
-    """Elimina tildes, espacios extra y pasa a minúsculas para un cruce perfecto"""
     if pd.isna(texto): return ""
     t = str(texto).strip().lower()
     return unicodedata.normalize('NFKD', t).encode('ASCII', 'ignore').decode('utf-8')
 
 def calc_attr_rows(base, obj_row, group_keys, mes_anio, fytd, orden_mes):
     rows = []
-    
     cols_obj_norm = {normalizar_texto(col): col for col in obj_row.columns} if not obj_row.empty else {}
 
     for keys_vals, grp in base.groupby(group_keys):
         if not isinstance(keys_vals, tuple): keys_vals = (keys_vals,)
         extra = dict(zip(group_keys, keys_vals))
         extra.update({'mes_anio':mes_anio,'fytd':fytd,'orden_mes':orden_mes})
-        
+
         for col_idx, nombre_attr in TODOS_ATTR.items():
             es_bin = col_idx in ATTR_BINARIO
             vals   = pd.to_numeric(grp[nombre_attr], errors='coerce')
             score  = calc_attr_score(vals, es_bin)
             if np.isnan(score): continue
-            
+
             nombre_norm = normalizar_texto(nombre_attr)
             obj_val = np.nan
             if nombre_norm in cols_obj_norm:
                 col_real = cols_obj_norm[nombre_norm]
                 obj_val = float(obj_row[col_real].values[0])
-                
+
             rows.append({**extra, 'atributo':nombre_attr, 'es_binario':es_bin,
                          'pct_score':round(score,4), 'n_respuestas':int(vals.dropna().__len__()),
                          'obj_atributo':obj_val,
@@ -229,7 +288,7 @@ def procesar_isc(arch, nombre, df_aps, df_obj):
     at_aps    = calc_attr_rows(base, obj_row, ['ciudad','dealer','aps_nombre'], mes_anio, fytd, orden_mes)
     return {'isc_base':base,'isc_mensual':m_dlr_df,'isc_aps':m_aps_df,
             'atributos_dlr':pd.DataFrame(at_dlr),'atributos_aps':pd.DataFrame(at_aps),
-            'mes_anio':mes_anio,'fytd':fytd}
+            'mes_anio':mes_anio,'fytd':fytd,'mes':mes,'anio':anio}
 
 def procesar_tre(arch, nombre, df_aps):
     mes, anio  = extraer_mes_anio(nombre)
@@ -240,17 +299,15 @@ def procesar_tre(arch, nombre, df_aps):
     mapeo_df   = obtener_mapeo_completo(df_aps, mes, anio)
     m_dlr      = dict(zip(mapeo_df['APS'], mapeo_df['Dealer']))
     m_ciu      = dict(zip(mapeo_df['APS'], mapeo_df['Ciudad']))
-    
+
     df = pd.read_excel(arch, engine="xlrd")
-    
     df = df.drop_duplicates(subset=[df.columns[3], df.columns[4]], keep='last').copy()
-    
-    aps        = df.iloc[:,20].fillna('SIN ASESOR').astype(str).str.strip().str.upper()
-    status     = df.iloc[:,7].fillna('').astype(str).str.strip()
-    
+
+    aps    = df.iloc[:,20].fillna('SIN ASESOR').astype(str).str.strip().str.upper()
+    status = df.iloc[:,7].fillna('').astype(str).str.strip()
+
     fechas_validas = pd.to_datetime(df.iloc[:,6], format='mixed', dayfirst=True, errors='coerce')
     hoy = pd.Timestamp.today().normalize()
-    
     status = np.where((status == 'Contacto en uso') & (fechas_validas < hoy), 'Expirado', status)
 
     base = pd.DataFrame({
@@ -263,13 +320,13 @@ def procesar_tre(arch, nombre, df_aps):
         'C': np.where(status=='Entrevista completa',1,0),
         'F': np.where(status=='Contacto en uso',1,0),
     })
-    
+
     def agg_tre(g): return pd.Series({'E':g['E'].sum(),'C':g['C'].sum(),'F':g['F'].sum()})
     m_dlr_df = base.groupby(['mes_anio','fytd','orden_mes','ciudad','dealer']).apply(agg_tre).reset_index()
     m_dlr_df['prom_tre'] = np.where(m_dlr_df['E']>0, m_dlr_df['C']/m_dlr_df['E'], np.nan)
     m_aps_df = base.groupby(['mes_anio','fytd','orden_mes','ciudad','dealer','aps_nombre']).apply(agg_tre).reset_index()
     m_aps_df['prom_tre'] = np.where(m_aps_df['E']>0, m_aps_df['C']/m_aps_df['E'], np.nan)
-    
+
     m = (status != '') & (status != 'nan')
     pend = pd.DataFrame({
         'mes_anio':mes_anio,'fytd':fytd,
@@ -282,11 +339,13 @@ def procesar_tre(arch, nombre, df_aps):
         'fecha_validez':df.loc[m].iloc[:,6].astype(str).values,
         'status':status[m],
     })
-    
-    return {'tre_base':base,'tre_mensual':m_dlr_df,'tre_aps':m_aps_df,
-            'pendientes':pend,'mes_anio':mes_anio,'fytd':fytd}
 
-# ── UI ────────────────────────────────────────────────────────────────────────
+    return {'tre_base':base,'tre_mensual':m_dlr_df,'tre_aps':m_aps_df,
+            'pendientes':pend,'mes_anio':mes_anio,'fytd':fytd,'mes':mes,'anio':anio}
+
+# ==============================================================================
+# UI
+# ==============================================================================
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@700;900&family=Barlow:wght@400;600&display=swap');
@@ -296,52 +355,74 @@ html,[class*="css"]{font-family:'Barlow',sans-serif!important}
 .error-box{background:#ffebee;border-radius:8px;padding:1rem 1.5rem;border-left:4px solid #D32F2F}
 </style>""", unsafe_allow_html=True)
 
-st.title("⚙️ VoC Preprocesador  v2")
-st.markdown("**Genera CSVs intermedios acumulados. Sube los 2 archivos del mes.**")
+st.title("⚙️ VoC Preprocesador  v3")
+st.markdown("**Estructura GCS:** `datos_procesados/{dealer}/{YYYY}_{Mes}/archivo.csv`")
 
-with st.expander("📁 Estado actual de datos procesados", expanded=False):
-    csvs_info = [
-        ("01_isc_base.csv","ISC detalle"),("02_tre_base.csv","TRE detalle"),
-        ("03_isc_mensual_dealer.csv","ISC×Dealer"),("04_tre_mensual_dealer.csv","TRE×Dealer"),
-        ("05_atributos_resumen.csv","Atrib×Dealer"),("06_pendientes.csv","Pendientes"),
-        ("07_objetivos.csv","Objetivos"),("08_isc_mensual_aps.csv","ISC×APS"),
-        ("09_tre_mensual_aps.csv","TRE×APS"),("10_atributos_aps.csv","Atrib×APS"),
-    ]
-    cols_e = st.columns(3)
-    for i,(archivo,desc) in enumerate(csvs_info):
-        ruta = CARPETA_SALIDA/archivo
-        with cols_e[i%3]:
-            if ruta.exists():
-                dt = pd.read_csv(ruta)
-                pp = sorted(dt['mes_anio'].unique()) if 'mes_anio' in dt.columns else []
-                st.success(f"✅ **{archivo}**\n\n{len(dt):,} filas · {len(pp)} periodos")
-            else:
-                st.warning(f"⬜ **{archivo}**\n\n{desc} — no existe")
+# ---------------------------------------------------------------------------
+# Estado actual en GCS
+# ---------------------------------------------------------------------------
+with st.expander("📁 Estado actual en GCS (todos los dealers)", expanded=False):
+    try:
+        resumen = estado_gcs_todos_dealers()
+        cols_e = st.columns(len(DEALERS))
+        for i, (nombre_dealer, slug) in enumerate(DEALERS.items()):
+            with cols_e[i]:
+                periodos = resumen.get(slug, [])
+                if periodos:
+                    st.success(f"**{nombre_dealer}**\n\n{len(periodos)} período(s):\n" +
+                               "\n".join(f"- {p}" for p in periodos))
+                else:
+                    st.warning(f"**{nombre_dealer}**\n\nSin datos aún")
+    except Exception as ex:
+        st.warning(f"No se pudo consultar GCS: {ex}")
 
 st.markdown("---")
+
+# ---------------------------------------------------------------------------
+# Paso 0 — Selección de Dealer
+# ---------------------------------------------------------------------------
+st.subheader("🏢 Paso 0 — Selecciona el Dealer")
+opciones_dealer = ["-- Selecciona Dealer --"] + list(DEALERS.keys())
+dealer_seleccionado = st.selectbox("Dealer que está cargando datos:", opciones_dealer, key="sel_dealer")
+
+if dealer_seleccionado != "-- Selecciona Dealer --":
+    dealer_slug = DEALERS[dealer_seleccionado]
+    st.info(f"📂 Los datos se guardarán en: `datos_procesados/{dealer_slug}/{{YYYY}}_{{Mes}}/`")
+
+st.markdown("---")
+
+# ---------------------------------------------------------------------------
+# Paso 1 — Archivos del mes
+# ---------------------------------------------------------------------------
 st.subheader("📂 Paso 1 — Archivos del mes")
-ruta_info_local = CARPETA_SALIDA/"INFO_BASE.xlsx"
-col_i,col_isc,col_tre = st.columns(3)
+ruta_info_local = CARPETA_SALIDA / "INFO_BASE.xlsx"
+col_i, col_isc, col_tre = st.columns(3)
+
 with col_i:
-    st.markdown("**INFO_BASE.xlsx**")
-    st.caption("Hoja APS: Periodo, Ciudad*, Dealer, APS  (*opcional aún)")
-    arch_info = st.file_uploader("INFO_BASE",type=["xlsx"],key="up_info",label_visibility="collapsed")
+    st.markdown("**INFO_BASE.xlsx** *(global, único)*")
+    st.caption("Hoja APS: Periodo, Ciudad*, Dealer, APS")
+    arch_info = st.file_uploader("INFO_BASE", type=["xlsx"], key="up_info", label_visibility="collapsed")
     if arch_info:
         ruta_info_local.write_bytes(arch_info.read())
-        # --- GATILLO GCP ---
-        upload_to_gcs(str(ruta_info_local), "INFO_BASE.xlsx", "datos_procesados/")
-        st.success("✅ Guardado")
+        upload_to_gcs(str(ruta_info_local), "datos_procesados/INFO_BASE.xlsx")
+        st.success("✅ INFO_BASE guardado (global)")
     if ruta_info_local.exists(): st.info("📌 Guardado localmente")
+
 with col_isc:
     st.markdown("**ISC** (`d413a5.xls`)")
-    arch_isc = st.file_uploader("ISC",type=["xls","xlsx"],key="up_isc",label_visibility="collapsed")
+    arch_isc = st.file_uploader("ISC", type=["xls","xlsx"], key="up_isc", label_visibility="collapsed")
     if arch_isc: st.caption(f"📎 {arch_isc.name}")
+
 with col_tre:
     st.markdown("**TRE** (`21014a.xls`)")
-    arch_tre = st.file_uploader("TRE",type=["xls","xlsx"],key="up_tre",label_visibility="collapsed")
+    arch_tre = st.file_uploader("TRE", type=["xls","xlsx"], key="up_tre", label_visibility="collapsed")
     if arch_tre: st.caption(f"📎 {arch_tre.name}")
 
 st.markdown("---")
+
+# ---------------------------------------------------------------------------
+# Carga Manual — Atributos Especiales
+# ---------------------------------------------------------------------------
 st.subheader("📝 Carga Manual — Atributos Especiales")
 
 c_fy, c_mo, c_ciu = st.columns(3)
@@ -361,32 +442,40 @@ with caa: val_aa = st.number_input("Customer Expectations CES (%)", min_value=0.
 with cab: val_ab = st.number_input("Alertas atendidas 24 Hrs (%)", min_value=0.0, max_value=100.0, value=0.0, step=1.0)
 
 with cbtn:
-    st.markdown("<div style='margin-top:28px'></div>",unsafe_allow_html=True)
+    st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
     if st.button("💾 Guardar Especiales", use_container_width=True):
-        df_nuevo = pd.DataFrame([{
-            'fytd': fytd_esp, 'mes': mes_esp, 'ciudad': ciudad_esp,
-            'Bien a la primera H1': val_z / 100.0, 
-            'Customer Expectations CES': val_aa / 100.0, 
-            'Alertas atendidas en 24 Hrs': val_ab / 100.0
-        }])
-        
-        if RUTA_ESPECIALES.exists():
-            df_e = pd.read_csv(RUTA_ESPECIALES)
-            
-            if 'ciudad' not in df_e.columns:
-                df_e['ciudad'] = "LA PAZ" 
-                
-            df_e = df_e[~((df_e['fytd'] == fytd_esp) & (df_e['mes'] == mes_esp) & (df_e['ciudad'] == ciudad_esp))]
-            df_c = pd.concat([df_e, df_nuevo], ignore_index=True)
+        if dealer_seleccionado == "-- Selecciona Dealer --":
+            st.error("❌ Selecciona el Dealer (Paso 0) antes de guardar.")
         else:
-            df_c = df_nuevo
-            
-        df_c.to_csv(RUTA_ESPECIALES, index=False)
+            dealer_slug = DEALERS[dealer_seleccionado]
+            df_nuevo_esp = pd.DataFrame([{
+                'fytd': fytd_esp, 'mes': mes_esp, 'ciudad': ciudad_esp,
+                'Bien a la primera H1': val_z / 100.0,
+                'Customer Expectations CES': val_aa / 100.0,
+                'Alertas atendidas en 24 Hrs': val_ab / 100.0
+            }])
+            # Descargar acumulado actual de GCS para este dealer
+            blob_esp = f"datos_procesados/{dealer_slug}/11_atributos_especiales.csv"
+            df_existente = download_df_from_gcs(blob_esp)
+            if df_existente is not None:
+                if 'ciudad' not in df_existente.columns:
+                    df_existente['ciudad'] = "LA PAZ"
+                df_existente = df_existente[~(
+                    (df_existente['fytd'] == fytd_esp) &
+                    (df_existente['mes'] == mes_esp) &
+                    (df_existente['ciudad'] == ciudad_esp)
+                )]
+                df_c_esp = pd.concat([df_existente, df_nuevo_esp], ignore_index=True)
+            else:
+                df_c_esp = df_nuevo_esp
 
-        upload_to_gcs(str(RUTA_ESPECIALES), "11_atributos_especiales.csv", "datos_procesados/")
-        
-        st.success(f"✅ ¡Atributos de {ciudad_esp} ({mes_esp} {fytd_esp}) guardados con éxito!")
-# =========================================================================
+            df_c_esp.to_csv(RUTA_ESPECIALES, index=False)
+            upload_dealer(str(RUTA_ESPECIALES), "11_atributos_especiales.csv", dealer_slug)
+            st.success(f"✅ Especiales de {dealer_seleccionado} — {ciudad_esp} ({mes_esp} {fytd_esp}) guardados.")
+
+# ---------------------------------------------------------------------------
+# Carga Manual — Verbalizaciones
+# ---------------------------------------------------------------------------
 st.markdown("---")
 st.subheader("🗣️ Carga Manual — Verbalizaciones del Cliente")
 
@@ -401,98 +490,126 @@ with c_ciu_v:
 st.markdown("Pega tu tabla directamente en la celda vacía de abajo (puedes usar **Ctrl+V** desde Excel):")
 
 columnas_verb = [
-    "Categoría", "Sub-Categoría", "Variación", 
+    "Categoría", "Sub-Categoría", "Variación",
     "Comentarios relacionados", "SATISFACCIÓN NETA", "Por SATISFACCIÓN NETA", "Detalle 1", "Detalle 2"
 ]
 df_verb_vacio = pd.DataFrame(columns=columnas_verb)
-
 df_verb_editado = st.data_editor(df_verb_vacio, num_rows="dynamic", use_container_width=True, key="editor_verb")
 
 with st.columns([1,2,1])[1]:
     st.markdown("<div style='margin-top:10px'></div>", unsafe_allow_html=True)
     if st.button("💾 Guardar Verbalizaciones", use_container_width=True):
-        if not df_verb_editado.empty:
-            df_verb_editado['fytd'] = fytd_verb
-            df_verb_editado['mes'] = mes_verb
+        if dealer_seleccionado == "-- Selecciona Dealer --":
+            st.error("❌ Selecciona el Dealer (Paso 0) antes de guardar.")
+        elif not df_verb_editado.empty:
+            dealer_slug = DEALERS[dealer_seleccionado]
+            df_verb_editado['fytd']   = fytd_verb
+            df_verb_editado['mes']    = mes_verb
             df_verb_editado['ciudad'] = ciudad_verb
-            
-            if RUTA_VERBALIZACIONES.exists():
-                df_v = pd.read_csv(RUTA_VERBALIZACIONES)
-                if 'ciudad' not in df_v.columns: df_v['ciudad'] = "LA PAZ"
-                df_v = df_v[~((df_v['fytd'] == fytd_verb) & (df_v['mes'] == mes_verb) & (df_v['ciudad'] == ciudad_verb))]
-                df_c_v = pd.concat([df_v, df_verb_editado], ignore_index=True)
+
+            blob_verb = f"datos_procesados/{dealer_slug}/12_verbalizaciones.csv"
+            df_v_existente = download_df_from_gcs(blob_verb)
+            if df_v_existente is not None:
+                if 'ciudad' not in df_v_existente.columns:
+                    df_v_existente['ciudad'] = "LA PAZ"
+                df_v_existente = df_v_existente[~(
+                    (df_v_existente['fytd'] == fytd_verb) &
+                    (df_v_existente['mes'] == mes_verb) &
+                    (df_v_existente['ciudad'] == ciudad_verb)
+                )]
+                df_c_v = pd.concat([df_v_existente, df_verb_editado], ignore_index=True)
             else:
                 df_c_v = df_verb_editado
-                
+
             df_c_v.to_csv(RUTA_VERBALIZACIONES, index=False)
-            # --- GATILLO GCP ---
-            upload_to_gcs(str(RUTA_VERBALIZACIONES), "12_verbalizaciones.csv", "datos_procesados/")
-            
-            st.success(f"✅ ¡Verbalizaciones de {ciudad_verb} ({mes_verb} {fytd_verb}) guardadas con éxito!")
+            upload_dealer(str(RUTA_VERBALIZACIONES), "12_verbalizaciones.csv", dealer_slug)
+            st.success(f"✅ Verbalizaciones de {dealer_seleccionado} — {ciudad_verb} ({mes_verb} {fytd_verb}) guardadas.")
         else:
             st.warning("⚠️ La tabla está vacía. Pega los datos antes de guardar.")
 
 st.markdown("---")
-st.subheader("⚡ Paso 2 — Procesar y acumular")
-cb,cn = st.columns([1,3])
-with cb: btn = st.button("🚀 Procesar",type="primary",use_container_width=True)
-with cn: st.caption("Append + dedup por periodo. Reprocesar el mismo mes sobrescribe solo ese periodo.")
+
+# ---------------------------------------------------------------------------
+# Paso 2 — Procesar y subir a GCS
+# ---------------------------------------------------------------------------
+st.subheader("⚡ Paso 2 — Procesar y subir a GCS")
+cb, cn = st.columns([1,3])
+with cb: btn = st.button("🚀 Procesar", type="primary", use_container_width=True)
+with cn: st.caption("Cada mes/dealer se guarda en su propia carpeta en GCS. Reprocesar el mismo mes/dealer reemplaza solo ese período.")
 
 if btn:
     errs = []
+    if dealer_seleccionado == "-- Selecciona Dealer --": errs.append("❌ Debes seleccionar el Dealer (Paso 0)")
     if not ruta_info_local.exists() and arch_info is None: errs.append("❌ Falta INFO_BASE")
-    if arch_isc is None: errs.append("❌ Falta ISC")
-    if arch_tre is None: errs.append("❌ Falta TRE")
+    if arch_isc is None: errs.append("❌ Falta archivo ISC")
+    if arch_tre is None: errs.append("❌ Falta archivo TRE")
+
     if errs:
         for e in errs: st.error(e)
     else:
-        prog = st.progress(0,"Iniciando...")
+        dealer_slug = DEALERS[dealer_seleccionado]
+        prog = st.progress(0, "Iniciando...")
         log  = []
         try:
-            prog.progress(5,"Cargando INFO_BASE...")
+            prog.progress(5, "Cargando INFO_BASE...")
             df_aps = cargar_mapeo_aps(str(ruta_info_local))
             df_obj = cargar_objetivos(str(ruta_info_local))
             ciu = sorted(df_aps['Ciudad'].unique())
             log.append(f"✅ INFO_BASE — {len(df_aps)} APS · Ciudades: {', '.join(ciu)}")
 
-            append_csv(RUTA_OBJETIVOS, df_obj, ['fytd'])
-            log.append("✅ 07_objetivos.csv")
+            # Objetivos: global en raíz
+            save_global_csv(RUTA_OBJETIVOS, df_obj, ['fytd'])
+            log.append("✅ 07_objetivos.csv (global)")
 
-            prog.progress(20,f"ISC: {arch_isc.name}...")
+            prog.progress(20, f"ISC: {arch_isc.name}...")
             arch_isc.seek(0)
             ri = procesar_isc(arch_isc, arch_isc.name, df_aps, df_obj)
+            mes, anio = ri['mes'], ri['anio']
             log.append(f"✅ ISC — {len(ri['isc_base'])} encuestas · {ri['mes_anio']} · {ri['fytd']}")
 
-            prog.progress(40,"Guardando ISC...")
-            append_csv(RUTA_ISC_BASE,    ri['isc_base'],     ['mes_anio','ciudad','dealer','aps_nombre','voc01'])
-            append_csv(RUTA_ISC_MENSUAL, ri['isc_mensual'],  ['mes_anio','ciudad','dealer'])
-            append_csv(RUTA_ISC_APS,     ri['isc_aps'],      ['mes_anio','ciudad','dealer','aps_nombre'])
-            append_csv(RUTA_ATRIBUTOS,   ri['atributos_dlr'],['mes_anio','ciudad','dealer','atributo'])
-            append_csv(RUTA_ATRIB_APS,   ri['atributos_aps'],['mes_anio','ciudad','dealer','aps_nombre','atributo'])
-            log.append("   → 01,03,05,08,10 guardados")
+            prog.progress(40, f"Subiendo ISC → {dealer_slug}/{anio}_{mes}/...")
+            for ruta, df in [
+                (RUTA_ISC_BASE,    ri['isc_base']),
+                (RUTA_ISC_MENSUAL, ri['isc_mensual']),
+                (RUTA_ISC_APS,     ri['isc_aps']),
+                (RUTA_ATRIBUTOS,   ri['atributos_dlr']),
+                (RUTA_ATRIB_APS,   ri['atributos_aps']),
+            ]:
+                guardar_csv(ruta, df)
+                upload_periodo(str(ruta), ruta.name, dealer_slug, mes, anio)
+            log.append(f"   → 01,03,05,08,10 subidos a {dealer_slug}/{anio}_{mes}/")
 
-            prog.progress(65,f"TRE: {arch_tre.name}...")
+            prog.progress(65, f"TRE: {arch_tre.name}...")
             arch_tre.seek(0)
             rt = procesar_tre(arch_tre, arch_tre.name, df_aps)
             log.append(f"✅ TRE — {len(rt['tre_base'])} contactos · {rt['mes_anio']}")
 
-            prog.progress(85,"Guardando TRE...")
-            append_csv(RUTA_TRE_BASE,    rt['tre_base'],    ['mes_anio','ciudad','dealer','aps_nombre','status','E'])
-            append_csv(RUTA_TRE_MENSUAL, rt['tre_mensual'], ['mes_anio','ciudad','dealer'])
-            append_csv(RUTA_TRE_APS,     rt['tre_aps'],     ['mes_anio','ciudad','dealer','aps_nombre'])
-            append_csv(RUTA_PENDIENTES,  rt['pendientes'],  ['mes_anio','ciudad','dealer','aps_nombre','cliente_nombre','cliente_celular'])
-            log.append("   → 02,04,06,09 guardados")
+            prog.progress(85, f"Subiendo TRE → {dealer_slug}/{anio}_{mes}/...")
+            for ruta, df in [
+                (RUTA_TRE_BASE,    rt['tre_base']),
+                (RUTA_TRE_MENSUAL, rt['tre_mensual']),
+                (RUTA_TRE_APS,     rt['tre_aps']),
+                (RUTA_PENDIENTES,  rt['pendientes']),
+            ]:
+                guardar_csv(ruta, df)
+                upload_periodo(str(ruta), ruta.name, dealer_slug, mes, anio)
+            log.append(f"   → 02,04,06,09 subidos a {dealer_slug}/{anio}_{mes}/")
 
-            prog.progress(100,"✅ Listo")
-            st.markdown("<div class='success-box'>"+"<br>".join(log)+"</div>",unsafe_allow_html=True)
+            prog.progress(100, "✅ Listo")
+            st.markdown("<div class='success-box'>" + "<br>".join(log) + "</div>", unsafe_allow_html=True)
             st.balloons()
+
         except Exception as e:
-            prog.progress(100,"❌ Error")
-            st.markdown(f"<div class='error-box'>❌ {e}</div>",unsafe_allow_html=True)
+            prog.progress(100, "❌ Error")
+            st.markdown(f"<div class='error-box'>❌ {e}</div>", unsafe_allow_html=True)
             import traceback; st.code(traceback.format_exc())
 
 st.markdown("---")
-st.subheader("🔍 Paso 3 — Verificar")
+
+# ---------------------------------------------------------------------------
+# Paso 3 — Verificar (lectura local)
+# ---------------------------------------------------------------------------
+st.subheader("🔍 Paso 3 — Verificar (último procesado localmente)")
 opciones = {
     "01-ISC base":RUTA_ISC_BASE,"02-TRE base":RUTA_TRE_BASE,
     "03-ISC×Dealer":RUTA_ISC_MENSUAL,"04-TRE×Dealer":RUTA_TRE_MENSUAL,
@@ -500,32 +617,25 @@ opciones = {
     "07-Objetivos":RUTA_OBJETIVOS,"08-ISC×APS":RUTA_ISC_APS,
     "09-TRE×APS":RUTA_TRE_APS,"10-Atrib×APS":RUTA_ATRIB_APS,
 }
-sel = st.selectbox("CSV:",list(opciones.keys()))
+sel = st.selectbox("CSV:", list(opciones.keys()))
 rsel = opciones[sel]
 
 if rsel.exists():
     dv = pd.read_csv(rsel)
-    
-    c1,c2,c3,c4 = st.columns(4)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Filas", f"{len(dv):,}")
     c2.metric("Cols", len(dv.columns))
-    
     if 'mes_anio' in dv.columns:
         periodos_unicos = dv['mes_anio'].unique()
         c3.metric("Periodos", len(periodos_unicos))
-        
         if 'orden_mes' in dv.columns:
-            ultimo_periodo = dv.sort_values('orden_mes')['mes_anio'].iloc[-1]
-            c4.metric("Último", ultimo_periodo)
+            c4.metric("Período", dv.sort_values('orden_mes')['mes_anio'].iloc[-1])
         else:
             pp = sorted(periodos_unicos)
-            c4.metric("Último", pp[-1] if len(pp)>0 else "-")
-            
+            c4.metric("Período", pp[-1] if pp else "-")
     if 'ciudad' in dv.columns:
-        st.info(f"Ciudades detectadas: {', '.join(sorted(dv['ciudad'].unique().astype(str)))}")
-        
+        st.info(f"Ciudades: {', '.join(sorted(dv['ciudad'].unique().astype(str)))}")
     st.dataframe(dv.head(100), use_container_width=True)
-    
     st.download_button(
         label=f"Descargar {rsel.name}",
         data=dv.to_csv(index=False).encode('utf-8'),

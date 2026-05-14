@@ -47,38 +47,73 @@ import io
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def cargar_datos():
-    rutas = {
-        "isc_base"    : "01_isc_base.csv",
-        "tre_base"    : "02_tre_base.csv",
-        "isc_mensual" : "03_isc_mensual_dealer.csv",
-        "tre_mensual" : "04_tre_mensual_dealer.csv",
-        "atributos"   : "05_atributos_resumen.csv",
-        "pendientes"  : "06_pendientes.csv",
-        "objetivos"   : "07_objetivos.csv",
-        "isc_aps"     : "08_isc_mensual_aps.csv",
-        "tre_aps"     : "09_tre_mensual_aps.csv",
-        "atrib_aps"   : "10_atributos_aps.csv",
-        "verbaliz"    : "12_verbalizaciones.csv",
-        "especiales"  : "11_atributos_especiales.csv" 
-    }
-    
+    """
+    Nueva estructura GCS:
+      datos_procesados/{dealer_slug}/{YYYY}_{Mes}/01..10_*.csv  → acumulado por período
+      datos_procesados/{dealer_slug}/11_atributos_especiales.csv → acumulado por dealer
+      datos_procesados/{dealer_slug}/12_verbalizaciones.csv      → acumulado por dealer
+      datos_procesados/07_objetivos.csv                          → global
+      datos_procesados/INFO_BASE.xlsx                            → global
+    """
     BUCKET_NAME = "bk_voc"
     credentials_dict = st.secrets["gcp_service_account"]
     credentials = service_account.Credentials.from_service_account_info(credentials_dict)
     client = storage.Client(credentials=credentials)
     bucket = client.bucket(BUCKET_NAME)
-    
-    dfs = {}
-    for clave, nombre_archivo in rutas.items():
-        blob_path = f"datos_procesados/{nombre_archivo}"
-        blob = bucket.blob(blob_path)
-        
-        if blob.exists():
-            data_bytes = blob.download_as_bytes()
-            dfs[clave] = pd.read_csv(io.BytesIO(data_bytes), low_memory=False)
-        else:
-            dfs[clave] = pd.DataFrame()
-            
+
+    # Archivos por período (01-06, 08-10): 4 niveles de ruta
+    ARCHIVOS_PERIODO = {
+        "01_isc_base.csv"            : "isc_base",
+        "02_tre_base.csv"            : "tre_base",
+        "03_isc_mensual_dealer.csv"  : "isc_mensual",
+        "04_tre_mensual_dealer.csv"  : "tre_mensual",
+        "05_atributos_resumen.csv"   : "atributos",
+        "06_pendientes.csv"          : "pendientes",
+        "08_isc_mensual_aps.csv"     : "isc_aps",
+        "09_tre_mensual_aps.csv"     : "tre_aps",
+        "10_atributos_aps.csv"       : "atrib_aps",
+    }
+    # Archivos acumulados por dealer (11-12): 3 niveles de ruta
+    ARCHIVOS_DEALER = {
+        "11_atributos_especiales.csv": "especiales",
+        "12_verbalizaciones.csv"     : "verbaliz",
+    }
+
+    # Inicializar acumuladores
+    acum = {clave: [] for clave in list(ARCHIVOS_PERIODO.values()) + list(ARCHIVOS_DEALER.values())}
+
+    # 07_objetivos.csv — global en raíz
+    blob_obj = bucket.blob("datos_procesados/07_objetivos.csv")
+    if blob_obj.exists():
+        dfs_obj = pd.read_csv(io.BytesIO(blob_obj.download_as_bytes()), low_memory=False)
+    else:
+        dfs_obj = pd.DataFrame()
+
+    # Recorrer todos los blobs bajo datos_procesados/
+    all_blobs = list(bucket.list_blobs(prefix="datos_procesados/"))
+
+    for blob in all_blobs:
+        partes = blob.name.split("/")
+        # datos_procesados/{dealer}/{periodo}/{archivo}  → len == 4
+        if len(partes) == 4:
+            _, dealer_slug, periodo, archivo = partes
+            if archivo in ARCHIVOS_PERIODO:
+                clave = ARCHIVOS_PERIODO[archivo]
+                df = pd.read_csv(io.BytesIO(blob.download_as_bytes()), low_memory=False)
+                acum[clave].append(df)
+        # datos_procesados/{dealer}/{archivo}  → len == 3
+        elif len(partes) == 3:
+            _, dealer_slug, archivo = partes
+            if archivo in ARCHIVOS_DEALER:
+                clave = ARCHIVOS_DEALER[archivo]
+                df = pd.read_csv(io.BytesIO(blob.download_as_bytes()), low_memory=False)
+                acum[clave].append(df)
+
+    # Concatenar listas en DataFrames únicos
+    dfs = {"objetivos": dfs_obj}
+    for clave, lista in acum.items():
+        dfs[clave] = pd.concat(lista, ignore_index=True) if lista else pd.DataFrame()
+
     return dfs
 
 def get_obj(df_obj, fytd, campo):
