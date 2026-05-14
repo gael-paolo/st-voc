@@ -48,12 +48,19 @@ import io
 @st.cache_data(ttl=3600, show_spinner=False)
 def cargar_datos():
     """
-    Nueva estructura GCS:
-      datos_procesados/{dealer_slug}/{YYYY}_{Mes}/01..10_*.csv  → acumulado por período
-      datos_procesados/{dealer_slug}/11_atributos_especiales.csv → acumulado por dealer
-      datos_procesados/{dealer_slug}/12_verbalizaciones.csv      → acumulado por dealer
-      datos_procesados/07_objetivos.csv                          → global
-      datos_procesados/INFO_BASE.xlsx                            → global
+    Lee datos desde GCS soportando dos estructuras:
+
+    Nueva (por ciudad/período):
+      datos_procesados/{ciudad_slug}/{YYYY}_{Mes}/01..10_*.csv
+      datos_procesados/{ciudad_slug}/11_atributos_especiales.csv
+      datos_procesados/{ciudad_slug}/12_verbalizaciones.csv
+
+    Antigua (compatibilidad hacia atrás — archivos planos en raíz):
+      datos_procesados/01_isc_base.csv  …  datos_procesados/12_verbalizaciones.csv
+
+    Global (siempre en raíz):
+      datos_procesados/07_objetivos.csv
+      datos_procesados/INFO_BASE.xlsx
     """
     BUCKET_NAME = "bk_voc"
     credentials_dict = st.secrets["gcp_service_account"]
@@ -61,7 +68,7 @@ def cargar_datos():
     client = storage.Client(credentials=credentials)
     bucket = client.bucket(BUCKET_NAME)
 
-    # Archivos por período (01-06, 08-10): 4 niveles de ruta
+    # Mapa nombre-de-archivo → clave interna
     ARCHIVOS_PERIODO = {
         "01_isc_base.csv"            : "isc_base",
         "02_tre_base.csv"            : "tre_base",
@@ -73,46 +80,76 @@ def cargar_datos():
         "09_tre_mensual_aps.csv"     : "tre_aps",
         "10_atributos_aps.csv"       : "atrib_aps",
     }
-    # Archivos acumulados por dealer (11-12): 3 niveles de ruta
-    ARCHIVOS_DEALER = {
+    ARCHIVOS_CIUDAD = {
         "11_atributos_especiales.csv": "especiales",
         "12_verbalizaciones.csv"     : "verbaliz",
     }
+    TODOS_ARCHIVOS = {**ARCHIVOS_PERIODO, **ARCHIVOS_CIUDAD}
 
-    # Inicializar acumuladores
-    acum = {clave: [] for clave in list(ARCHIVOS_PERIODO.values()) + list(ARCHIVOS_DEALER.values())}
+    acum = {clave: [] for clave in TODOS_ARCHIVOS.values()}
 
-    # 07_objetivos.csv — global en raíz
+    # 07_objetivos.csv — siempre en raíz
     blob_obj = bucket.blob("datos_procesados/07_objetivos.csv")
-    if blob_obj.exists():
-        dfs_obj = pd.read_csv(io.BytesIO(blob_obj.download_as_bytes()), low_memory=False)
-    else:
-        dfs_obj = pd.DataFrame()
+    dfs_obj = pd.read_csv(io.BytesIO(blob_obj.download_as_bytes()), low_memory=False) \
+              if blob_obj.exists() else pd.DataFrame()
 
-    # Recorrer todos los blobs bajo datos_procesados/
-    all_blobs = list(bucket.list_blobs(prefix="datos_procesados/"))
-
-    for blob in all_blobs:
+    # Recorrer todos los blobs
+    for blob in bucket.list_blobs(prefix="datos_procesados/"):
         partes = blob.name.split("/")
-        # datos_procesados/{dealer}/{periodo}/{archivo}  → len == 4
-        if len(partes) == 4:
-            _, dealer_slug, periodo, archivo = partes
-            if archivo in ARCHIVOS_PERIODO:
-                clave = ARCHIVOS_PERIODO[archivo]
-                df = pd.read_csv(io.BytesIO(blob.download_as_bytes()), low_memory=False)
-                acum[clave].append(df)
-        # datos_procesados/{dealer}/{archivo}  → len == 3
-        elif len(partes) == 3:
-            _, dealer_slug, archivo = partes
-            if archivo in ARCHIVOS_DEALER:
-                clave = ARCHIVOS_DEALER[archivo]
-                df = pd.read_csv(io.BytesIO(blob.download_as_bytes()), low_memory=False)
-                acum[clave].append(df)
+        n = len(partes)
 
-    # Concatenar listas en DataFrames únicos
+        if n == 4:
+            # Nueva estructura: datos_procesados/{ciudad}/{periodo}/{archivo}
+            archivo = partes[3]
+            if archivo in TODOS_ARCHIVOS:
+                clave = TODOS_ARCHIVOS[archivo]
+                acum[clave].append(
+                    pd.read_csv(io.BytesIO(blob.download_as_bytes()), low_memory=False)
+                )
+
+        elif n == 3:
+            # Nivel ciudad (sin período): datos_procesados/{ciudad}/{archivo}
+            archivo = partes[2]
+            if archivo in ARCHIVOS_CIUDAD:
+                clave = ARCHIVOS_CIUDAD[archivo]
+                acum[clave].append(
+                    pd.read_csv(io.BytesIO(blob.download_as_bytes()), low_memory=False)
+                )
+
+        elif n == 2:
+            # Estructura antigua (compatibilidad): datos_procesados/{archivo}
+            archivo = partes[1]
+            if archivo in TODOS_ARCHIVOS:
+                clave = TODOS_ARCHIVOS[archivo]
+                acum[clave].append(
+                    pd.read_csv(io.BytesIO(blob.download_as_bytes()), low_memory=False)
+                )
+
+    # Consolidar
     dfs = {"objetivos": dfs_obj}
     for clave, lista in acum.items():
-        dfs[clave] = pd.concat(lista, ignore_index=True) if lista else pd.DataFrame()
+        if lista:
+            df_concat = pd.concat(lista, ignore_index=True)
+            # Deduplicar si hay overlap entre estructura nueva y antigua
+            if clave in ("isc_mensual", "tre_mensual"):
+                df_concat = df_concat.drop_duplicates(
+                    subset=["mes_anio", "ciudad", "dealer"], keep="last"
+                )
+            elif clave in ("isc_aps", "tre_aps"):
+                df_concat = df_concat.drop_duplicates(
+                    subset=["mes_anio", "ciudad", "dealer", "aps_nombre"], keep="last"
+                )
+            elif clave == "atributos":
+                df_concat = df_concat.drop_duplicates(
+                    subset=["mes_anio", "ciudad", "dealer", "atributo"], keep="last"
+                )
+            elif clave == "atrib_aps":
+                df_concat = df_concat.drop_duplicates(
+                    subset=["mes_anio", "ciudad", "dealer", "aps_nombre", "atributo"], keep="last"
+                )
+            dfs[clave] = df_concat
+        else:
+            dfs[clave] = pd.DataFrame()
 
     return dfs
 

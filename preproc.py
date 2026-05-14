@@ -20,10 +20,13 @@ from google.oauth2 import service_account
 # --- CONFIGURACIÓN ---
 BUCKET_NAME = "bk_voc"
 
-DEALERS = {
-    "Centro Nacional de Servicio": "centro_nacional",
-    "El Alto"                    : "el_alto",
-    "Express"                    : "express",
+CIUDADES = {
+    "LA PAZ"      : "la_paz",
+    "SANTA CRUZ"  : "santa_cruz",
+    "COCHABAMBA"  : "cochabamba",
+    "TARIJA"      : "tarija",
+    "SUCRE"       : "sucre",
+    "NACIONAL"    : "nacional",
 }
 
 # --- AUTENTICACIÓN GCP vía st.secrets ---
@@ -73,11 +76,10 @@ def listar_periodos_dealer(dealer_slug):
         periodos.append(parte)
     return sorted(periodos)
 
-def estado_gcs_todos_dealers():
-    """Retorna dict {dealer_slug: [periodos]} con lo que hay en GCS."""
-    client = _gcs_client()
+def estado_gcs_todas_ciudades():
+    """Retorna dict {ciudad_slug: [periodos]} con lo que hay en GCS."""
     resumen = {}
-    for slug in DEALERS.values():
+    for slug in CIUDADES.values():
         periodos = listar_periodos_dealer(slug)
         resumen[slug] = periodos
     return resumen
@@ -361,33 +363,33 @@ st.markdown("**Estructura GCS:** `datos_procesados/{dealer}/{YYYY}_{Mes}/archivo
 # ---------------------------------------------------------------------------
 # Estado actual en GCS
 # ---------------------------------------------------------------------------
-with st.expander("📁 Estado actual en GCS (todos los dealers)", expanded=False):
+with st.expander("📁 Estado actual en GCS (todas las ciudades)", expanded=False):
     try:
-        resumen = estado_gcs_todos_dealers()
-        cols_e = st.columns(len(DEALERS))
-        for i, (nombre_dealer, slug) in enumerate(DEALERS.items()):
+        resumen = estado_gcs_todas_ciudades()
+        cols_e = st.columns(len(CIUDADES))
+        for i, (nombre_ciudad, slug) in enumerate(CIUDADES.items()):
             with cols_e[i]:
                 periodos = resumen.get(slug, [])
                 if periodos:
-                    st.success(f"**{nombre_dealer}**\n\n{len(periodos)} período(s):\n" +
+                    st.success(f"**{nombre_ciudad}**\n\n{len(periodos)} período(s):\n" +
                                "\n".join(f"- {p}" for p in periodos))
                 else:
-                    st.warning(f"**{nombre_dealer}**\n\nSin datos aún")
+                    st.warning(f"**{nombre_ciudad}**\n\nSin datos aún")
     except Exception as ex:
         st.warning(f"No se pudo consultar GCS: {ex}")
 
 st.markdown("---")
 
 # ---------------------------------------------------------------------------
-# Paso 0 — Selección de Dealer
+# Paso 0 — Selección de Ciudad
 # ---------------------------------------------------------------------------
-st.subheader("🏢 Paso 0 — Selecciona el Dealer")
-opciones_dealer = ["-- Selecciona Dealer --"] + list(DEALERS.keys())
-dealer_seleccionado = st.selectbox("Dealer que está cargando datos:", opciones_dealer, key="sel_dealer")
+st.subheader("🏙️ Paso 0 — Selecciona la Ciudad")
+opciones_ciudad_up = ["-- Selecciona Ciudad --"] + list(CIUDADES.keys())
+ciudad_seleccionada = st.selectbox("Ciudad que está cargando datos:", opciones_ciudad_up, key="sel_ciudad")
 
-if dealer_seleccionado != "-- Selecciona Dealer --":
-    dealer_slug = DEALERS[dealer_seleccionado]
-    st.info(f"📂 Los datos se guardarán en: `datos_procesados/{dealer_slug}/{{YYYY}}_{{Mes}}/`")
+if ciudad_seleccionada != "-- Selecciona Ciudad --":
+    ciudad_slug = CIUDADES[ciudad_seleccionada]
+    st.info(f"📂 Los datos se guardarán en: `datos_procesados/{ciudad_slug}/{{YYYY}}_{{Mes}}/`")
 
 st.markdown("---")
 
@@ -444,22 +446,22 @@ with cab: val_ab = st.number_input("Alertas atendidas 24 Hrs (%)", min_value=0.0
 with cbtn:
     st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
     if st.button("💾 Guardar Especiales", use_container_width=True):
-        if dealer_seleccionado == "-- Selecciona Dealer --":
-            st.error("❌ Selecciona el Dealer (Paso 0) antes de guardar.")
+        if ciudad_seleccionada == "-- Selecciona Ciudad --":
+            st.error("❌ Selecciona la Ciudad (Paso 0) antes de guardar.")
         else:
-            dealer_slug = DEALERS[dealer_seleccionado]
+            ciudad_slug = CIUDADES[ciudad_seleccionada]
             df_nuevo_esp = pd.DataFrame([{
                 'fytd': fytd_esp, 'mes': mes_esp, 'ciudad': ciudad_esp,
                 'Bien a la primera H1': val_z / 100.0,
                 'Customer Expectations CES': val_aa / 100.0,
                 'Alertas atendidas en 24 Hrs': val_ab / 100.0
             }])
-            # Descargar acumulado actual de GCS para este dealer
-            blob_esp = f"datos_procesados/{dealer_slug}/11_atributos_especiales.csv"
+            # Descargar acumulado actual de GCS para esta ciudad
+            blob_esp = f"datos_procesados/{ciudad_slug}/11_atributos_especiales.csv"
             df_existente = download_df_from_gcs(blob_esp)
             if df_existente is not None:
                 if 'ciudad' not in df_existente.columns:
-                    df_existente['ciudad'] = "LA PAZ"
+                    df_existente['ciudad'] = ciudad_seleccionada
                 df_existente = df_existente[~(
                     (df_existente['fytd'] == fytd_esp) &
                     (df_existente['mes'] == mes_esp) &
@@ -470,8 +472,8 @@ with cbtn:
                 df_c_esp = df_nuevo_esp
 
             df_c_esp.to_csv(RUTA_ESPECIALES, index=False)
-            upload_dealer(str(RUTA_ESPECIALES), "11_atributos_especiales.csv", dealer_slug)
-            st.success(f"✅ Especiales de {dealer_seleccionado} — {ciudad_esp} ({mes_esp} {fytd_esp}) guardados.")
+            upload_dealer(str(RUTA_ESPECIALES), "11_atributos_especiales.csv", ciudad_slug)
+            st.success(f"✅ Especiales de {ciudad_seleccionada} ({mes_esp} {fytd_esp}) guardados.")
 
 # ---------------------------------------------------------------------------
 # Carga Manual — Verbalizaciones
@@ -499,19 +501,19 @@ df_verb_editado = st.data_editor(df_verb_vacio, num_rows="dynamic", use_containe
 with st.columns([1,2,1])[1]:
     st.markdown("<div style='margin-top:10px'></div>", unsafe_allow_html=True)
     if st.button("💾 Guardar Verbalizaciones", use_container_width=True):
-        if dealer_seleccionado == "-- Selecciona Dealer --":
-            st.error("❌ Selecciona el Dealer (Paso 0) antes de guardar.")
+        if ciudad_seleccionada == "-- Selecciona Ciudad --":
+            st.error("❌ Selecciona la Ciudad (Paso 0) antes de guardar.")
         elif not df_verb_editado.empty:
-            dealer_slug = DEALERS[dealer_seleccionado]
+            ciudad_slug = CIUDADES[ciudad_seleccionada]
             df_verb_editado['fytd']   = fytd_verb
             df_verb_editado['mes']    = mes_verb
             df_verb_editado['ciudad'] = ciudad_verb
 
-            blob_verb = f"datos_procesados/{dealer_slug}/12_verbalizaciones.csv"
+            blob_verb = f"datos_procesados/{ciudad_slug}/12_verbalizaciones.csv"
             df_v_existente = download_df_from_gcs(blob_verb)
             if df_v_existente is not None:
                 if 'ciudad' not in df_v_existente.columns:
-                    df_v_existente['ciudad'] = "LA PAZ"
+                    df_v_existente['ciudad'] = ciudad_seleccionada
                 df_v_existente = df_v_existente[~(
                     (df_v_existente['fytd'] == fytd_verb) &
                     (df_v_existente['mes'] == mes_verb) &
@@ -522,8 +524,8 @@ with st.columns([1,2,1])[1]:
                 df_c_v = df_verb_editado
 
             df_c_v.to_csv(RUTA_VERBALIZACIONES, index=False)
-            upload_dealer(str(RUTA_VERBALIZACIONES), "12_verbalizaciones.csv", dealer_slug)
-            st.success(f"✅ Verbalizaciones de {dealer_seleccionado} — {ciudad_verb} ({mes_verb} {fytd_verb}) guardadas.")
+            upload_dealer(str(RUTA_VERBALIZACIONES), "12_verbalizaciones.csv", ciudad_slug)
+            st.success(f"✅ Verbalizaciones de {ciudad_seleccionada} ({mes_verb} {fytd_verb}) guardadas.")
         else:
             st.warning("⚠️ La tabla está vacía. Pega los datos antes de guardar.")
 
@@ -539,7 +541,7 @@ with cn: st.caption("Cada mes/dealer se guarda en su propia carpeta en GCS. Repr
 
 if btn:
     errs = []
-    if dealer_seleccionado == "-- Selecciona Dealer --": errs.append("❌ Debes seleccionar el Dealer (Paso 0)")
+    if ciudad_seleccionada == "-- Selecciona Ciudad --": errs.append("❌ Debes seleccionar la Ciudad (Paso 0)")
     if not ruta_info_local.exists() and arch_info is None: errs.append("❌ Falta INFO_BASE")
     if arch_isc is None: errs.append("❌ Falta archivo ISC")
     if arch_tre is None: errs.append("❌ Falta archivo TRE")
@@ -547,7 +549,7 @@ if btn:
     if errs:
         for e in errs: st.error(e)
     else:
-        dealer_slug = DEALERS[dealer_seleccionado]
+        ciudad_slug = CIUDADES[ciudad_seleccionada]
         prog = st.progress(0, "Iniciando...")
         log  = []
         try:
@@ -567,7 +569,7 @@ if btn:
             mes, anio = ri['mes'], ri['anio']
             log.append(f"✅ ISC — {len(ri['isc_base'])} encuestas · {ri['mes_anio']} · {ri['fytd']}")
 
-            prog.progress(40, f"Subiendo ISC → {dealer_slug}/{anio}_{mes}/...")
+            prog.progress(40, f"Subiendo ISC → {ciudad_slug}/{anio}_{mes}/...")
             for ruta, df in [
                 (RUTA_ISC_BASE,    ri['isc_base']),
                 (RUTA_ISC_MENSUAL, ri['isc_mensual']),
@@ -576,15 +578,15 @@ if btn:
                 (RUTA_ATRIB_APS,   ri['atributos_aps']),
             ]:
                 guardar_csv(ruta, df)
-                upload_periodo(str(ruta), ruta.name, dealer_slug, mes, anio)
-            log.append(f"   → 01,03,05,08,10 subidos a {dealer_slug}/{anio}_{mes}/")
+                upload_periodo(str(ruta), ruta.name, ciudad_slug, mes, anio)
+            log.append(f"   → 01,03,05,08,10 subidos a {ciudad_slug}/{anio}_{mes}/")
 
             prog.progress(65, f"TRE: {arch_tre.name}...")
             arch_tre.seek(0)
             rt = procesar_tre(arch_tre, arch_tre.name, df_aps)
             log.append(f"✅ TRE — {len(rt['tre_base'])} contactos · {rt['mes_anio']}")
 
-            prog.progress(85, f"Subiendo TRE → {dealer_slug}/{anio}_{mes}/...")
+            prog.progress(85, f"Subiendo TRE → {ciudad_slug}/{anio}_{mes}/...")
             for ruta, df in [
                 (RUTA_TRE_BASE,    rt['tre_base']),
                 (RUTA_TRE_MENSUAL, rt['tre_mensual']),
@@ -592,8 +594,8 @@ if btn:
                 (RUTA_PENDIENTES,  rt['pendientes']),
             ]:
                 guardar_csv(ruta, df)
-                upload_periodo(str(ruta), ruta.name, dealer_slug, mes, anio)
-            log.append(f"   → 02,04,06,09 subidos a {dealer_slug}/{anio}_{mes}/")
+                upload_periodo(str(ruta), ruta.name, ciudad_slug, mes, anio)
+            log.append(f"   → 02,04,06,09 subidos a {ciudad_slug}/{anio}_{mes}/")
 
             prog.progress(100, "✅ Listo")
             st.markdown("<div class='success-box'>" + "<br>".join(log) + "</div>", unsafe_allow_html=True)
