@@ -1666,6 +1666,9 @@ def render_pendientes():
     ds_p.columns = ["Asesor","Nombre del Cliente","Celular","Mail","Fecha Validez", "Estado"]
     ds_p = ds_p.sort_values("Asesor").reset_index(drop=True)
     ds_p["Celular"] = ds_p["Celular"].astype(str).str.replace(".0","",regex=False)
+    _fv_dt = pd.to_datetime(ds_p["Fecha Validez"], format='mixed', dayfirst=True, errors='coerce')
+    _mask_uso = ds_p["Estado"].isin(["Contacto en uso", "Expirado"])
+    ds_p.loc[_mask_uso, "Fecha Validez"] = (_fv_dt[_mask_uso] - pd.Timedelta(days=1)).dt.strftime('%d/%m/%Y')
     
     st_p = ds_p.style.apply(lambda row: ["color:#D32F2F;font-weight:bold" if c == "Estado" and row["Estado"] == "Expirado" else ("color:#FF8C00;font-weight:bold" if c == "Estado" and row["Estado"] == "Contacto en uso" else "") for c in row.index], axis=1).set_table_attributes('class="tabla-voc"').hide(axis="index")
     st.markdown(tabla_html(st_p), unsafe_allow_html=True)
@@ -2030,9 +2033,11 @@ def render_vista_aps():
 
     st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
     st.markdown("<h4 style='color:#1A1A2E; font-weight:bold;'>Agenda Activa: Clientes a contactar ahora</h4>", unsafe_allow_html=True)
-    df_p_show = aplicar_filtro_ciudad(D["pendientes"], CIUDAD).query(f"aps_nombre=='{aps_sel}' and status=='Contacto en uso'")[["cliente_nombre", "cliente_celular", "fecha_validez"]]
+    df_p_show = aplicar_filtro_ciudad(D["pendientes"], CIUDAD).query(f"aps_nombre=='{aps_sel}' and status=='Contacto en uso'")[["cliente_nombre", "cliente_celular", "fecha_validez"]].copy()
     if not df_p_show.empty:
         df_p_show.columns = ["Nombre del Cliente", "Celular de Contacto", "Vence en"]
+        _fv_agenda = pd.to_datetime(df_p_show["Vence en"], format='mixed', dayfirst=True, errors='coerce')
+        df_p_show["Vence en"] = (_fv_agenda - pd.Timedelta(days=1)).dt.strftime('%d/%m/%Y')
         st.markdown(tabla_html(df_p_show.style.hide(axis="index").set_table_attributes('class="tabla-voc"')), unsafe_allow_html=True)
     else: st.success("¡Sin pendientes!")
     st.markdown("</div>", unsafe_allow_html=True)
