@@ -335,7 +335,7 @@ def filtrar(df, fytd=None, mes=None, ciudad=None, dealer=None, aps=None):
 def meses_de(df, fytd, ciudad=None, dealer=None):
     d=filtrar(df,fytd=fytd,ciudad=ciudad,dealer=dealer)
     if d.empty: return []
-    return sorted(d.drop_duplicates("mes_anio").sort_values("orden_mes")["mes_anio"].tolist())
+    return d.drop_duplicates("mes_anio").sort_values("orden_mes")["mes_anio"].tolist()
 
 def tabla_html(styled): return f"<div class='table-scroll'>{styled.to_html()}</div>"
 
@@ -388,7 +388,8 @@ if "seccion" not in st.session_state: st.session_state.seccion = "caratula"
 if "perfil" not in st.session_state: st.session_state.perfil = None
 if "ciudad_sel" not in st.session_state: st.session_state.ciudad_sel = "TODAS"
 
-D = cargar_datos()
+with st.spinner("Cargando datos desde GCS (puede tardar en la primera carga)..."):
+    D = cargar_datos()
 
 if D["isc_mensual"].empty and D["tre_mensual"].empty:
     st.warning("Sin datos. Ejecuta primero preprocesador.py.")

@@ -1,0 +1,9 @@
+.env
+*.json
+!package.json
+.streamlit/secrets.toml
+datos_procesados/
+__pycache__/
+*.pyc
+.venv/
+venv/
