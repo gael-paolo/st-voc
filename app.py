@@ -416,6 +416,45 @@ div[data-testid="stSelectbox"] label p{font-weight:700!important;font-size:12px!
 """, unsafe_allow_html=True)
 
 # ==============================================================================
+# ACCESO CON CONTRASEÑA (definida en st.secrets["app_password"])
+# ==============================================================================
+import hmac
+
+def verificar_acceso():
+    """Muestra la pantalla de acceso y detiene la app hasta ingresar la contraseña correcta."""
+    if st.session_state.get("acceso_ok"):
+        return
+    try:
+        clave_app = st.secrets.get("app_password")
+    except Exception:
+        clave_app = None
+    if not clave_app:
+        st.error("Falta configurar la contraseña de la app (app_password) en los secrets.")
+        st.stop()
+
+    st.markdown("""
+<style>
+    [data-testid="stSidebar"], [data-testid="collapsedControl"] { display: none !important; }
+</style>
+""", unsafe_allow_html=True)
+    _, c_login, _ = st.columns([1, 1.2, 1])
+    with c_login:
+        st.markdown("<div style='height:12vh'></div>", unsafe_allow_html=True)
+        st.markdown("<div class='seccion-titulo'>Portal VoC Taiyo</div>", unsafe_allow_html=True)
+        with st.form("form_acceso"):
+            clave = st.text_input("Contraseña:", type="password")
+            entrar = st.form_submit_button("Ingresar", type="primary", use_container_width=True)
+        if entrar:
+            if hmac.compare_digest(clave.encode("utf-8"), str(clave_app).encode("utf-8")):
+                st.session_state["acceso_ok"] = True
+                st.rerun()
+            else:
+                st.error("Contraseña incorrecta.")
+    st.stop()
+
+verificar_acceso()
+
+# ==============================================================================
 # SIDEBAR + SESSION STATE
 # ==============================================================================
 if "seccion" not in st.session_state: st.session_state.seccion = "caratula"
@@ -473,17 +512,16 @@ if sec != "caratula":
             st.markdown("<div style='padding:8px 16px;font-size:11px;color:#666;letter-spacing:1px;font-weight:700'>MI PERFIL</div>", unsafe_allow_html=True)
             if st.button("VISTA APS", key="nav_aps"): st.session_state.seccion="vista_aps"
             st.markdown("<hr>", unsafe_allow_html=True)
-            st.markdown("<div style='padding:8px 16px;font-size:11px;color:#666;letter-spacing:1px;font-weight:700'>EXPORTAR</div>", unsafe_allow_html=True)
-            if st.button("DESCARGAR PDF", key="nav_dl"): st.session_state.seccion="descargar_pdf"
+            # Solo el perfil General puede recargar los datos.
+            # Se limpia únicamente la caché de cargar_datos (no la de imágenes ni gráficos).
+            if st.button("Recargar datos", key="nav_rel"):
+                cargar_datos.clear()
+                st.session_state["datos_recargados"] = True
+                st.rerun()
         
         elif perfil == "APS":
             st.markdown("<div style='padding:8px 16px;font-size:11px;color:#666;letter-spacing:1px;font-weight:700'>MI PERFIL</div>", unsafe_allow_html=True)
             if st.button("VISTA APS", key="nav_aps"): st.session_state.seccion="vista_aps"
-        
-        if st.button("Recargar datos",key="nav_rel"):
-            st.cache_data.clear()
-            st.session_state["datos_recargados"] = True
-            st.rerun()
 
     ciudad_cols = st.columns([0.18, 0.82])
     with ciudad_cols[0]:
@@ -2024,7 +2062,7 @@ def render_vista_aps():
             ax_r.text(bar.get_width()+0.01, bar.get_y()+bar.get_height()/2, f"{bar.get_width():.1%}", va='center', fontsize=11 if is_me else 9, fontweight='bold')
         ax_r.axvline(obj_isc, color=COLOR_OBJETIVO, linestyle="--", alpha=0.4)
         ax_r.set_xlim(0, 1.15); ax_r.tick_params(axis='y', length=0)
-        st.pyplot(fig_r)
+        st.pyplot(fig_r); plt.close(fig_r)
 
     with c_kpi:
         penalties = df_isc_sel["I16"].sum()*2 + df_isc_sel["I78"].sum()
@@ -2151,7 +2189,7 @@ def render_vista_aps():
         ax_e1.tick_params(axis='y', labelsize=12)
         ax_e1.spines['top'].set_visible(False); ax_e1.spines['right'].set_visible(False)
         plt.xticks(rotation=45, fontsize=12); plt.tight_layout()
-        st.pyplot(fig_e1)
+        st.pyplot(fig_e1); plt.close(fig_e1)
         st.markdown("</div>", unsafe_allow_html=True)
 
     with c_ev2:
@@ -2172,278 +2210,8 @@ def render_vista_aps():
         ax_e2.tick_params(axis='y', labelsize=12)
         ax_e2.spines['top'].set_visible(False); ax_e2.spines['right'].set_visible(False)
         plt.xticks(rotation=45, fontsize=12); plt.tight_layout()
-        st.pyplot(fig_e2)
+        st.pyplot(fig_e2); plt.close(fig_e2)
         st.markdown("</div>", unsafe_allow_html=True)
-
-# ==============================================================================
-# SECCIÓN 8: MOTOR DE EXPORTACIÓN EJECUTIVA TAIYO MOTORS
-# ==============================================================================
-from matplotlib.backends.backend_pdf import PdfPages
-import matplotlib.patches as patches
-
-COLOR_TAIYO = "#C62828" 
-
-def preparar_diapositiva(title_slide=None):
-    """Genera el lienzo 16:9 con el encabezado premium (Texto Blanco y Grande)."""
-    fig = plt.figure(figsize=(16, 9), facecolor='white')
-    
-    rect = patches.Rectangle((0, 0.92), 1, 0.08, transform=fig.transFigure, color='#1A1A2E', zorder=0)
-    fig.patches.append(rect)
-    
-    line = patches.Rectangle((0, 0.915), 1, 0.005, transform=fig.transFigure, color=COLOR_TAIYO, zorder=1)
-    fig.patches.append(line)
-    
-    fig.text(0.04, 0.945, "VOC INSIGHTS ANALYTICS", color='white', fontsize=16, fontweight='900', fontfamily='Barlow Condensed', transform=fig.transFigure)
-    
-    fig.text(0.96, 0.945, "TAIYO MOTORS", color='white', fontsize=20, fontweight='bold', ha='right', transform=fig.transFigure)
-    
-    if title_slide:
-        fig.text(0.04, 0.85, title_slide.upper(), color='#1A1A2E', fontsize=20, fontweight='bold', transform=fig.transFigure)
-    
-    ax = fig.add_axes([0.03, 0.02, 0.94, 0.78])
-    ax.axis('off')
-    
-    return fig, ax
-
-def construir_pdf(fytd_sel, mes_sel, dealer_sel, aps_sel, acum, ciudad, mm):
-    pdf_buf = io.BytesIO()
-    meses_proc = mm if mes_sel == "TODOS" else (mm[:mm.index(mes_sel)+1] if acum else [mes_sel])
-
-    PALETA_APS = ["#E91E63","#9C27B0","#3F51B5","#00BCD4","#4CAF50","#FF9800","#795548","#607D8B","#F44336","#009688","#CDDC39","#FF5722"]
-    PALETA_ATR = ["#1976D2", "#D32F2F", "#388E3C", "#9C27B0", "#FF9800", "#00BCD4", "#E91E63", "#795548", "#607D8B"]
-
-    with PdfPages(pdf_buf) as pdf:
-        # 1. CARÁTULA
-        fig_c, ax_c = plt.subplots(figsize=(16, 9), facecolor='white')
-        ax_c.axis('off')
-        ax_c.add_patch(patches.Rectangle((0, 0), 1, 1, color='#1A1A2E', transform=ax_c.transAxes))
-        ax_c.add_patch(patches.Rectangle((0, 0), 0.02, 1, color=COLOR_TAIYO, transform=ax_c.transAxes))
-        txt_m = mes_sel.upper() if mes_sel != "TODOS" else "PERIODO COMPLETO"
-        txt_a = "\n(ACUMULADO)" if acum and mes_sel != "TODOS" else ""
-        ax_c.text(0.1, 0.6, f"RESULTADOS VoC\nCORTE: {txt_m}{txt_a}", color='white', fontsize=48, fontweight='bold', ha='left', transform=ax_c.transAxes)
-        ax_c.text(0.1, 0.4, f"GESTIÓN: {fytd_sel.upper()} | SEDE: {ciudad.upper()}", color='#FFD600', fontsize=22, ha='left', transform=ax_c.transAxes)
-        det = f"UNIDAD: {dealer_sel.upper()}" if aps_sel == "TODOS" else f"ASESOR: {aps_sel.upper()}"
-        ax_c.text(0.1, 0.32, det, color='#E0E0E0', fontsize=18, ha='left', transform=ax_c.transAxes)
-        pdf.savefig(fig_c, bbox_inches='tight', dpi=300); plt.close(fig_c)
-
-        # 2. TRE E ISC
-        df_im = filtrar(D["isc_mensual"][D["isc_mensual"]["mes_anio"].isin(meses_proc)], fytd=fytd_sel, ciudad=ciudad)
-        df_tm = filtrar(D["tre_mensual"][D["tre_mensual"]["mes_anio"].isin(meses_proc)], fytd=fytd_sel, ciudad=ciudad)
-        obj_t = get_obj(D["objetivos"], fytd_sel, "obj_tre"); obj_i = get_obj(D["objetivos"], fytd_sel, "obj_isc")
-        agg_i = df_im[~df_im["dealer"].astype(str).str.upper().str.contains("SIN DEALER", na=False)].groupby("dealer").agg(enc=("total_encuestas","sum"),i16=("I16","sum"),i78=("I78","sum")).reset_index()
-        agg_t = df_tm[~df_tm["dealer"].astype(str).str.upper().str.contains("SIN DEALER", na=False)].groupby("dealer").agg(E=("E","sum"),C=("C","sum"),F=("F","sum")).reset_index()
-        df_d = agg_t.merge(agg_i,on="dealer",how="outer").fillna(0)
-        df_d["prom_tre"] = np.where(df_d["E"]>0, df_d["C"]/df_d["E"], 0)
-        df_d["prom_isc"] = np.where(df_d["enc"]>0, (df_d["enc"]-df_d["i16"]*2-df_d["i78"])/df_d["enc"], 0)
-        tot = {"dealer": "TOTAL GENERAL", "E": df_d["E"].sum(), "C": df_d["C"].sum(), "F": df_d["F"].sum(), "enc": df_d["enc"].sum(), "i16": df_d["i16"].sum(), "i78": df_d["i78"].sum(), "prom_tre": df_d["C"].sum()/df_d["E"].sum() if df_d["E"].sum()>0 else 0, "prom_isc": (df_d["enc"].sum()-df_d["i16"].sum()*2-df_d["i78"].sum())/df_d["enc"].sum() if df_d["enc"].sum()>0 else 0}
-        ds_d = pd.concat([df_d, pd.DataFrame([tot])], ignore_index=True)[["dealer","E","C","F","prom_tre","i16","i78","prom_isc"]]; ds_d.columns = ["Nombre","Env.","Comp.","Falta","TRE %","1-6","7-8","%ISC"]
-        
-        fig_dual, _ = preparar_diapositiva("Desempeño Operativo: TRE e ISC")
-        ax_l = fig_dual.add_axes([0.04, 0.1, 0.44, 0.70]); ax_l.axis('off'); ax_l.set_title("RESUMEN POR TALLER", fontsize=14, fontweight='bold', color=COLOR_TAIYO, pad=10)
-        ax_l.imshow(Image.open(io.BytesIO(cached_jpg_gen(ds_d.fillna(0), 'gral', obj_t, obj_i))))
-        
-        df_ia = filtrar(D["isc_aps"][D["isc_aps"]["mes_anio"].isin(meses_proc)], fytd=fytd_sel, ciudad=ciudad, dealer=dealer_sel if dealer_sel!="GENERAL" else None)
-        df_ta = filtrar(D["tre_aps"][D["tre_aps"]["mes_anio"].isin(meses_proc)], fytd=fytd_sel, ciudad=ciudad, dealer=dealer_sel if dealer_sel!="GENERAL" else None)
-        if not df_ia.empty:
-            agg_ii = df_ia.groupby("aps_nombre").agg(enc=("total_encuestas","sum"),i16=("I16","sum"),i78=("I78","sum")).reset_index()
-            agg_ti = df_ta.groupby("aps_nombre").agg(E=("E","sum"),C=("C","sum")).reset_index()
-            df_ap = agg_ti.merge(agg_ii, on="aps_nombre", how="outer").fillna(0)
-            df_ap["prom_tre"] = np.where(df_ap["E"]>0, df_ap["C"]/df_ap["E"], 0); df_ap["prom_isc"] = np.where(df_ap["enc"]>0, (df_ap["enc"]-df_ap["i16"]*2-df_ap["i78"])/df_ap["enc"], 0)
-            tot_ap = {"aps_nombre": "TOTAL GENERAL", "E": df_ap["E"].sum(), "C": df_ap["C"].sum(), "enc": df_ap["enc"].sum(), "i16": df_ap["i16"].sum(), "i78": df_ap["i78"].sum()}
-            tot_ap["prom_tre"] = tot_ap["C"]/tot_ap["E"] if tot_ap["E"]>0 else 0; tot_ap["prom_isc"] = (tot_ap["enc"] - tot_ap["i16"]*2 - tot_ap["i78"])/tot_ap["enc"] if tot_ap["enc"]>0 else 0
-            ds_ap = pd.concat([df_ap, pd.DataFrame([tot_ap])], ignore_index=True)[["aps_nombre","E","C","prom_tre","i16","i78","prom_isc"]]; ds_ap.columns = ["Nombre","Enviadas","Completadas","TRE %","1-6","7-8","% ISC"]
-            ax_r = fig_dual.add_axes([0.52, 0.1, 0.44, 0.70]); ax_r.axis('off'); ax_r.set_title("DETALLE POR ASESOR (APS)", fontsize=14, fontweight='bold', color=COLOR_TAIYO, pad=10)
-            ax_r.imshow(Image.open(io.BytesIO(cached_jpg_gen(ds_ap.fillna(0), 'aps', obj_t, obj_i))))
-        pdf.savefig(fig_dual, bbox_inches='tight', dpi=300); plt.close(fig_dual)
-
-        # 3. ATRIBUTOS ESPECIALES
-        df_esp_pdf = D["especiales"].copy() if not D["especiales"].empty else pd.DataFrame()
-        if not df_esp_pdf.empty:
-            df_esp_pdf['fytd'] = df_esp_pdf['fytd'].astype(str).str.strip().str.upper()
-            df_esp_pdf['mes']  = df_esp_pdf['mes'].astype(str).str.strip().str.capitalize()
-            if 'ciudad' in df_esp_pdf.columns:
-                df_esp_pdf['ciudad'] = df_esp_pdf['ciudad'].astype(str).str.strip().str.upper()
-        if not df_esp_pdf.empty:
-            f3, _ = preparar_diapositiva("Indicadores Especiales de Servicio")
-            meses_cortos = [str(m).split()[0].strip().capitalize() for m in meses_proc]
-            mask_pdf = (df_esp_pdf['fytd'] == fytd_sel.strip().upper()) & (df_esp_pdf['mes'].isin(meses_cortos))
-            if 'ciudad' in df_esp_pdf.columns and CIUDAD != "TODAS":
-                mask_pdf = mask_pdf & (df_esp_pdf['ciudad'] == CIUDAD.upper())
-            row_e = df_esp_pdf[mask_pdf]
-            names = ["Bien a la primera H1", "Customer Expectations CES", "Alertas atendidas en 24 Hrs"]
-            import unicodedata
-            def n_t(t): return unicodedata.normalize('NFKD', str(t).strip().lower()).encode('ASCII', 'ignore').decode('utf-8') if pd.notna(t) else ""
-            for i, name in enumerate(names):
-                val = float(row_e[name].mean()) if name in row_e.columns and pd.notna(row_e[name].mean()) else 0.0
-                obj_v = 0.85
-                for col in D["objetivos"].columns:
-                    if n_t(col) == n_t(name):
-                        r_o = D["objetivos"][D["objetivos"]["fytd"] == fytd_sel]
-                        if not r_o.empty: obj_v = float(r_o[col].values[0]) / (100.0 if float(r_o[col].values[0]) > 2 else 1.0)
-                        break
-                c_c = "#388E3C" if val >= obj_v else "#D32F2F"; c_b = "#F2F9F2" if val >= obj_v else "#FFEBEE"
-                ax = f3.add_axes([0.08 + (i*0.31), 0.15, 0.25, 0.65]); ax.axis('off')
-                card = patches.FancyBboxPatch((0, 0), 1, 1, boxstyle="round,pad=0.02,rounding_size=0.05", linewidth=2.5, edgecolor=c_c, facecolor=c_b, zorder=0); ax.add_patch(card)
-                ax.add_patch(patches.Ellipse((0.5, 0.72), width=0.40, height=0.2735, color=c_c, zorder=1))
-                ax.add_patch(patches.Ellipse((0.5, 0.72), width=0.40, height=0.2735, edgecolor='white', facecolor='none', linewidth=5, zorder=2))
-                ax.text(0.5, 0.72, f"{val:.0%}", color='white', fontsize=36, fontweight='900', ha='center', va='center', zorder=3)
-                ax.text(0.5, 0.40, textwrap.fill(name.upper(), 18), fontsize=15, fontweight='900', color='#1A1A2E', ha='center', va='center')
-                ax.text(0.5, 0.22, f"Objetivo: {obj_v:.0%}", fontsize=12, fontweight='bold', color='#555555', ha='center', va='center', bbox=dict(facecolor='white', edgecolor='#CCCCCC', boxstyle='round,pad=0.5', linewidth=1))
-                ax.text(0.5, 0.08, "¡CUMPLIDO!" if val >= obj_v else "NO CUMPLIDO", fontsize=16, fontweight='900', color=c_c, ha='center', va='center')
-            pdf.savefig(f3, bbox_inches='tight', dpi=300); plt.close(f3)
-
-        # 4. TENDENCIA ISC
-        f4, ax_img4 = preparar_diapositiva("Evolución Histórica: Índice de Satisfacción")
-        df_base_t_full = filtrar(D["isc_aps"] if dealer_sel != "GENERAL" else D["isc_mensual"], fytd=fytd_sel, ciudad=ciudad)
-        if dealer_sel != "GENERAL": df_base_t_full = df_base_t_full[df_base_t_full["dealer"] == dealer_sel]
-        df_prom_t = filtrar(D["isc_mensual"] if aps_sel == "TODOS" else D["isc_aps"], fytd=fytd_sel, ciudad=ciudad)
-        if dealer_sel != "GENERAL": df_prom_t = df_prom_t[df_prom_t["dealer"] == dealer_sel]
-        if aps_sel != "TODOS": df_prom_t = df_prom_t[df_prom_t["aps_nombre"] == aps_sel]
-        m_ord = df_base_t_full.drop_duplicates("mes_anio").sort_values("orden_mes")["mes_anio"].tolist()
-        if m_ord:
-            def serie_t(sub_df):
-                pts = []
-                for m in m_ord:
-                    if m not in sub_df["mes_anio"].values: pts.append(np.nan); continue
-                    g = sub_df[sub_df["orden_mes"] <= sub_df[sub_df["mes_anio"]==m]["orden_mes"].values[0]] if acum else sub_df[sub_df["mes_anio"] == m]
-                    pts.append((g["total_encuestas"].sum() - g["I16"].sum()*2 - g["I78"].sum())/g["total_encuestas"].sum() if g["total_encuestas"].sum()>0 else np.nan)
-                return pts
-            prom_vals = serie_t(df_prom_t); tots = [df_prom_t[df_prom_t["mes_anio"]==m]["total_encuestas"].sum() if m in df_prom_t["mes_anio"].values else 0 for m in m_ord]
-            s_sec, c_sec, m_sec = {}, {}, {}
-            if dealer_sel == "GENERAL":
-                for i, d in enumerate(sorted([x for x in df_base_t_full["dealer"].unique() if x != "SIN DEALER"])):
-                    s_sec[d] = serie_t(df_base_t_full[df_base_t_full["dealer"] == d]); c_sec[d] = COLORES_DEALERS.get(d, PALETA_ATR[i % len(PALETA_ATR)]); m_sec[d] = MARKERS_DEALERS.get(d, "o")
-            else:
-                for i, an in enumerate(sorted([x for x in df_base_t_full["aps_nombre"].unique() if str(x).strip().upper() != "SIN ASESOR"])):
-                    s_sec[an] = serie_t(df_base_t_full[df_base_t_full["aps_nombre"] == an]); c_sec[an] = COLOR_TAIYO if an == aps_sel else PALETA_APS[i % len(PALETA_APS)]; m_sec[an] = "o"
-            img_ten = cached_plot_tendencia(tuple(m_ord), tuple(tots), tuple(prom_vals), s_sec, c_sec, m_sec, obj_i, "SELECCIÓN" if aps_sel != "TODOS" else "PROM. GENERAL", "", ""); ax_img4.imshow(Image.open(io.BytesIO(img_ten))); pdf.savefig(f4, bbox_inches='tight', dpi=300); plt.close(f4)
-
-        # 5. ATRIBUTOS (RADIAL + TABLA)
-        f5, _ = preparar_diapositiva("Diagnóstico de Atributos: Radial y Tabla")
-        df_at_full = filtrar(D["atrib_aps"] if dealer_sel!="GENERAL" else D["atributos"], fytd=fytd_sel, ciudad=ciudad)
-        if dealer_sel != "GENERAL": df_at_full = df_at_full[df_at_full["dealer"]==dealer_sel]
-        df_at_p_full = df_at_full[df_at_full["mes_anio"].isin(meses_proc)]
-        if not df_at_p_full.empty:
-            sc_col="pct_score" if "pct_score" in df_at_p_full.columns else "pct_top2box"
-            attrs = sorted([a for a in df_at_p_full["atributo"].unique() if "bien a la primera" not in a.lower()])
-            def get_attr_avg(s_df):
-                r = {}
-                for a in attrs:
-                    g = s_df[s_df["atributo"]==a]
-                    r[a] = (g[sc_col]*g["n_respuestas"]).sum()/g["n_respuestas"].sum() if "n_respuestas" in g.columns and g["n_respuestas"].sum()>0 else (g[sc_col].mean() if not g.empty else 0)
-                return r
-            res_gen = get_attr_avg(df_at_p_full[df_at_p_full["aps_nombre"]==aps_sel] if aps_sel != "TODOS" else df_at_p_full)
-            ax_rad = f5.add_axes([0.02, 0.12, 0.38, 0.65], projection='polar'); angles = np.linspace(0, 2*np.pi, len(attrs), endpoint=False).tolist(); angles += angles[:1]
-            ax_rad.fill(angles, [res_gen.get(a,0) for a in attrs]+[res_gen.get(attrs[0],0)], color='#1A1A2E', alpha=0.1); ax_rad.plot(angles, [res_gen.get(a,0) for a in attrs]+[res_gen.get(attrs[0],0)], color='#1A1A2E', linewidth=2.5, label="SELECCIÓN" if aps_sel != "TODOS" else "PROM. GENERAL")
-            ax_rad.plot(angles, [obj_i]*(len(attrs)+1), color=COLOR_OBJETIVO, linewidth=1.5, linestyle="--")
-            if dealer_sel == "GENERAL":
-                for i, d in enumerate(sorted([x for x in df_at_p_full["dealer"].unique() if x != "SIN DEALER"])):
-                    rg = get_attr_avg(df_at_p_full[df_at_p_full["dealer"] == d]); ax_rad.plot(angles, [rg.get(a,0) for a in attrs]+[rg.get(attrs[0],0)], color=PALETA_ATR[i % len(PALETA_ATR)], linewidth=1.5, marker='o', markersize=4, alpha=0.8, label=f"Taller: {d}")
-            else:
-                for i, an in enumerate(sorted([x for x in df_at_p_full["aps_nombre"].unique() if str(x).strip().upper() != "SIN ASESOR"])):
-                    rg = get_attr_avg(df_at_p_full[df_at_p_full["aps_nombre"] == an]); ax_rad.plot(angles, [rg.get(a,0) for a in attrs]+[rg.get(attrs[0],0)], color=COLOR_TAIYO if an == aps_sel else PALETA_APS[i % len(PALETA_APS)], linewidth=2.0 if an==aps_sel else 1.2, marker='o', markersize=3, alpha=0.8, label=f"APS: {an}")
-            ax_rad.spines['polar'].set_visible(False); ax_rad.set_xticks([]); ax_rad.set_yticks([0.2,0.4,0.6,0.8,1.0]); ax_rad.set_yticklabels([]); ax_rad.set_ylim(0,1.35)
-            for i,(angle,attr) in enumerate(zip(angles[:-1],attrs)): ax_rad.text(angle, 1.30, f"{textwrap.fill(attr,14)}\n{res_gen.get(attr,0):.1%}", ha="left" if angle<np.pi else "right", va="center", fontsize=7.5, fontweight='bold', color='#333')
-            ax_rad.legend(loc="lower center", bbox_to_anchor=(0.5, -0.20), fontsize=7, frameon=False, ncol=2)
-            ax_tbl = f5.add_axes([0.48, 0.05, 0.50, 0.82]); ax_tbl.axis('off'); data_t = []
-            if dealer_sel == "GENERAL":
-                d_en = sorted([d for d in df_at_p_full["dealer"].unique() if d != "SIN DEALER"])
-                for a in attrs:
-                    row = {"Atributo": a}
-                    for d in d_en: g_d = df_at_p_full[(df_at_p_full['atributo']==a)&(df_at_p_full['dealer']==d)]; row[d] = (g_d[sc_col]*g_d["n_respuestas"]).sum()/g_d["n_respuestas"].sum() if "n_respuestas" in g_d.columns and g_d["n_respuestas"].sum()>0 else (g_d[sc_col].mean() if not g_d.empty else np.nan)
-                    row["GENERAL"] = res_gen.get(a, np.nan); row["Objetivo"] = 0.9; row["GAP"] = row["GENERAL"]-0.9; data_t.append(row)
-                df_t = pd.DataFrame(data_t).sort_values("GENERAL", ascending=True); cols_ev = tuple(d_en + ["GENERAL"])
-            else:
-                aps_en = sorted([an for an in df_at_p_full["aps_nombre"].unique() if str(an).strip().upper() != "SIN ASESOR"])
-                for a in attrs:
-                    row = {"Atributo": a}
-                    for an in aps_en: g_a = df_at_p_full[(df_at_p_full['atributo']==a)&(df_at_p_full['aps_nombre']==an)]; row[an] = (g_a[sc_col]*g_a["n_respuestas"]).sum()/g_a["n_respuestas"].sum() if "n_respuestas" in g_a.columns and g_a["n_respuestas"].sum()>0 else (g_a[sc_col].mean() if not g_a.empty else np.nan)
-                    row["GENERAL"] = res_gen.get(a, np.nan); row["Objetivo"] = 0.9; row["GAP"] = row["GENERAL"]-0.9; data_t.append(row)
-                df_t = pd.DataFrame(data_t).sort_values("GENERAL", ascending=True); cols_ev = tuple(aps_en + ["GENERAL"])
-            ax_tbl.imshow(Image.open(io.BytesIO(cached_jpg_attr_table(df_t.fillna(np.nan), cols_ev)))); pdf.savefig(f5, bbox_inches='tight', dpi=300); plt.close(f5)
-
-            # HISTÓRICOS ATRIBUTOS
-            sorted_attrs = sorted(attrs, key=lambda x: res_gen.get(x,0))
-            for a in sorted_attrs:
-                f_a, ax_a = preparar_diapositiva(f"Evolución Atributo: {a}")
-                def get_tr(s_df):
-                    v_l = []
-                    for m in m_ord:
-                        g = s_df[s_df["orden_mes"] <= s_df[s_df["mes_anio"]==m]["orden_mes"].values[0]] if acum else s_df[s_df["mes_anio"] == m]
-                        if g.empty: v_l.append(np.nan)
-                        else: v_l.append((g[sc_col]*g["n_respuestas"]).sum()/g["n_respuestas"].sum() if "n_respuestas" in g.columns and g["n_respuestas"].sum()>0 else g[sc_col].mean())
-                    return v_l
-                d_h, c_m = {}, {}
-                if dealer_sel == "GENERAL":
-                    d_h["TOTAL GENERAL"] = get_tr(D["atributos"][D["atributos"]["atributo"]==a]); c_m["TOTAL GENERAL"] = "#000"
-                    for i, d in enumerate(sorted([x for x in D["atributos"]["dealer"].unique() if x != "SIN DEALER"])): d_h[d] = get_tr(D["atributos"][(D["atributos"]["atributo"]==a)&(D["atributos"]["dealer"]==d)]); c_m[d] = PALETA_ATR[i % len(PALETA_ATR)]
-                else:
-                    lbl_tot = f"PROM {aps_sel}" if aps_sel != "TODOS" else f"TOTAL {dealer_sel}"
-                    d_h[lbl_tot] = get_tr(D["atrib_aps"][(D["atrib_aps"]["atributo"]==a)&(D["atrib_aps"]["dealer"]==dealer_sel)&(D["atrib_aps"]["aps_nombre"]==aps_sel)] if aps_sel!="TODOS" else D["atributos"][(D["atributos"]["atributo"]==a)&(D["atributos"]["dealer"]==dealer_sel)])
-                    c_m[lbl_tot] = "#000"
-                    for i, an in enumerate(sorted([x for x in D["atrib_aps"][(D["atrib_aps"]["dealer"]==dealer_sel)]["aps_nombre"].unique() if str(x).strip().upper() != "SIN ASESOR"])): 
-                        d_h[an] = get_tr(D["atrib_aps"][(D["atrib_aps"]["atributo"]==a)&(D["atrib_aps"]["dealer"]==dealer_sel)&(D["atrib_aps"]["aps_nombre"]==an)]); c_m[an] = COLOR_TAIYO if an == aps_sel else PALETA_APS[i % len(PALETA_APS)]
-                ax_a.imshow(Image.open(io.BytesIO(cached_hist_plot_attr(d_h, c_m, tuple(m_ord), 0.9, "", dealer_sel, aps_sel)))); pdf.savefig(f_a, bbox_inches='tight', dpi=300); plt.close(f_a)
-
-        # 6. VERBALIZACIONES
-        df_v = D["verbaliz"].copy()
-        if not df_v.empty:
-            meses_cortos = [str(m).split()[0].strip().capitalize() for m in meses_proc]
-            df_v = df_v[(df_v["fytd"] == fytd_sel.strip().upper()) & (df_v["mes"].isin(meses_cortos)) & (df_v["ciudad"] == ciudad)]
-            if not df_v.empty:
-                def cl_p(x): return float(str(x).split('%')[0].strip()) if pd.notna(x) and str(x).strip() not in ["-",""] else 0.0
-                df_v["sat_neta"] = df_v["SATISFACCIÓN NETA"].apply(cl_p); df_v["menciones_pct"] = df_v["Comentarios relacionados"].apply(cl_p)
-                df_g = df_v.groupby("Sub-Categoría").agg({"sat_neta":"mean", "menciones_pct":"sum"}).reset_index().query("menciones_pct > 0").sort_values("menciones_pct")
-                if not df_g.empty:
-                    # SLIDE A: MAPA
-                    f_v1, ax_main1 = preparar_diapositiva("Impacto Estratégico de Verbalizaciones"); ax_main1.remove(); ax_v1 = f_v1.add_axes([0.25, 0.08, 0.70, 0.70])
-                    yp = np.arange(len(df_g)); ax_v1.hlines(y=yp, xmin=0, xmax=100, color='#EEEEEE'); ax_v1.axvline(75, color=COLOR_OBJETIVO, linestyle='--')
-                    ax_v1.scatter(df_g["sat_neta"], yp, s=df_g["menciones_pct"]*110+200, c=['#D32F2F' if s<60 else '#FF9800' if s<85 else '#388E3C' for s in df_g["sat_neta"]], edgecolors="white")
-                    for i, s in enumerate(df_g["sat_neta"]): ax_v1.text(s, i, f"{s:.0f}%", ha='center', va='center', fontsize=9.5, color="white", fontweight='bold')
-                    ax_v1.set_yticks(yp); ax_v1.set_yticklabels([textwrap.fill(x, 28) for x in df_g["Sub-Categoría"]], fontsize=11, fontweight='bold', color="#1A1A2E")
-                    ax_v1.set_xlim(-5, 105); ax_v1.xaxis.set_major_formatter(mtick.PercentFormatter(100.0)); pdf.savefig(f_v1, bbox_inches='tight', dpi=300); plt.close(f_v1)
-                    
-                    # SLIDE B: RANKING
-                    f_v2, ax_main2 = preparar_diapositiva("Ranking de Temas más comentados"); ax_main2.remove(); ax_v2 = f_v2.add_axes([0.25, 0.08, 0.70, 0.70])
-                    df_top = df_g.sort_values("menciones_pct", ascending=True).tail(12)
-                    bars = ax_v2.barh(df_top["Sub-Categoría"], df_top["menciones_pct"], color=['#D32F2F' if s<75 else '#388E3C' for s in df_top["sat_neta"]], alpha=0.8)
-                    for bar in bars: ax_v2.text(bar.get_width() + 0.3, bar.get_y() + bar.get_height()/2, f'{bar.get_width():.1f}%', va='center', fontsize=11, fontweight='bold', color="#1A1A2E")
-                    ax_v2.set_xlim(0, df_top["menciones_pct"].max() * 1.2); ax_v2.set_yticks(np.arange(len(df_top))); ax_v2.set_yticklabels([textwrap.fill(x, 28) for x in df_top["Sub-Categoría"]], fontsize=11, fontweight='bold', color="#1A1A2E")
-                    pdf.savefig(f_v2, bbox_inches='tight', dpi=300); plt.close(f_v2)
-
-    pdf_buf.seek(0); return pdf_buf.getvalue()
-
-def render_descargas():
-    st.markdown("<div class='seccion-titulo'>Generador de Informes Ejecutivos PDF</div>", unsafe_allow_html=True)
-    st.markdown("""<div style='background:white; padding:20px; border-radius:10px; border-left:5px solid #C62828; margin-bottom:20px; box-shadow: 0 2px 10px rgba(0,0,0,0.05);'><p style='color:#1A1A2E; font-size:16px; margin:0;'>Módulo de alta resolución (300 DPI) con diseño institucional <b>Taiyo Motors</b>.</p></div>""", unsafe_allow_html=True)
-    
-    st.markdown("""
-    <style>
-        div[data-testid="stCheckbox"] label p {
-            font-weight: 900 !important; 
-            font-size: 14px !important; 
-            color: #1A1A2E !important; 
-            text-transform: uppercase; 
-            letter-spacing: 0.5px;
-        }
-    </style>
-    """, unsafe_allow_html=True)
-
-    c1, c2, c3, c4, c5 = st.columns([1.5, 1.5, 2, 2, 1])
-    with c1: fytd_pdf = st.selectbox("Periodo FYTD:", todos_fytd, key="pdf_fytd")
-    with c2: mm = meses_de(D["isc_mensual"], fytd_pdf, CIUDAD); mes_pdf = st.selectbox("Corte Mensual:", ["TODOS"] + mm if mm else ["TODOS"], key="pdf_mes")
-    with c3: dlrs = dealers_para_ciudad(CIUDAD); dealer_pdf = st.selectbox("Filtrar Taller:", dlrs, key="pdf_dlr")
-    with c4: aps_opts = aps_para_filtro(CIUDAD, dealer_pdf, fytd_pdf); aps_pdf = st.selectbox("Filtrar Asesor:", aps_opts, key="pdf_aps")
-    with c5: 
-        st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
-        acum_pdf = st.checkbox("ACUM", value=False, key="pdf_acum")
-        
-    if st.button("GENERAR INFORME TAIYO MOTORS (PDF)", type="primary", use_container_width=True):
-        with st.spinner("Compilando arquitectura corporativa y diapositivas de alta definición..."):
-            pdf_bytes = construir_pdf(fytd_pdf, mes_pdf, dealer_pdf, aps_pdf, acum_pdf, CIUDAD, mm); st.session_state.pdf_ready = pdf_bytes
-            
-    if st.session_state.get("pdf_ready"):
-        st.download_button(label="DESCARGAR REPORTE PDF", data=st.session_state.pdf_ready, file_name=f"Reporte_VoC_Taiyo_{CIUDAD}_{mes_pdf if mes_pdf!='TODOS' else fytd_pdf}.pdf", mime="application/pdf", use_container_width=True)
 
 # ==============================================================================
 # SECCIÓN DE INICIO
@@ -2486,5 +2254,4 @@ elif sec == "radial":         render_radial()
 elif sec == "pendientes":     render_pendientes()
 elif sec == "verbalizaciones": render_verbalizaciones()
 elif sec == "vista_aps":       render_vista_aps() 
-elif sec == "descargar_pdf":   render_descargas()
 else: render_caratula()
