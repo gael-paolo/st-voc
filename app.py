@@ -204,6 +204,11 @@ def color_obj(v, obj):
     if v >= obj: return "background-color:#ccffcc;color:black;font-weight:bold"
     return "background-color:#ffcccc;color:black;font-weight:bold"
 
+# Límites para exportar tablas como imagen
+JPG_MAX_FILAS = 150       # más filas que esto → descarga en Excel
+JPG_DPI = 120             # resolución de las tablas exportadas como JPG
+JPG_MAX_ALTO_PX = 12000   # alto máximo de la imagen en píxeles
+
 def fig_to_buf(fig):
     buf = io.BytesIO()
     fig.savefig(buf, format="jpeg", facecolor="white", bbox_inches="tight", dpi=150)
@@ -315,9 +320,38 @@ def styler_to_jpg_buf(styler):
                     fontweight="bold" if bold else "normal", color=fg)
             x += cw
 
+    # dpi adaptativo: limita el alto de la imagen para no exceder la memoria del servidor
+    dpi_final = max(40, min(JPG_DPI, int(JPG_MAX_ALTO_PX / max(fig_h, 1))))
     buf = io.BytesIO()
-    fig.savefig(buf, format="jpeg", facecolor="white", bbox_inches="tight", dpi=180)
+    fig.savefig(buf, format="jpeg", facecolor="white", bbox_inches="tight", dpi=dpi_final)
     plt.close(fig); buf.seek(0); return buf
+
+# ==============================================================================
+# DESCARGA DE TABLAS: JPG para tablas chicas, Excel para tablas grandes
+# ==============================================================================
+@st.cache_data(show_spinner=False, max_entries=20)
+def df_to_xlsx_bytes(df, hoja="Datos"):
+    """Convierte un DataFrame a bytes .xlsx (liviano en memoria)."""
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=hoja[:31])
+    return buf.getvalue()
+
+def boton_descarga_tabla(contenedor, label, df, generar_jpg, nombre_archivo, key):
+    """
+    Muestra un botón de descarga.
+    - Hasta JPG_MAX_FILAS filas: genera la imagen JPG con generar_jpg().
+    - Más filas: ofrece la tabla en Excel para evitar que la app se quede sin memoria.
+    """
+    if len(df) <= JPG_MAX_FILAS:
+        contenedor.download_button(label, data=generar_jpg(), file_name=f"{nombre_archivo}.jpg",
+                                   mime="image/jpeg", key=key)
+    else:
+        contenedor.download_button(f"{label} (Excel)", data=df_to_xlsx_bytes(df),
+                                   file_name=f"{nombre_archivo}.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   key=key)
+        contenedor.caption(f"La tabla tiene {len(df)} filas; se descarga en Excel en lugar de imagen.")
 
 def aplicar_filtro_ciudad(df, ciudad):
     if ciudad=="TODAS" or "ciudad" not in df.columns: return df
@@ -597,7 +631,7 @@ def render_general():
             .set_table_attributes('class="tabla-voc"').hide(axis="index")
         st.markdown(tabla_html(st2),unsafe_allow_html=True)
         
-        st.download_button("Tabla General", data=cached_jpg_gen(ds, 'gral', obj_tre, obj_isc), file_name="Tabla_General.jpg", mime="image/jpeg", key="dl_gd")
+        boton_descarga_tabla(st, "Tabla General", ds, lambda: cached_jpg_gen(ds, 'gral', obj_tre, obj_isc), "Tabla_General", "dl_gd")
         st.markdown("</div>",unsafe_allow_html=True)
 
     with cr:
@@ -631,7 +665,7 @@ def render_general():
             st_ap = ds_ap.style.apply(sty_a, axis=1).format({"TRE %":"{:.1%}","% ISC":"{:.1%}","Enviadas":"{:.0f}","Completadas":"{:.0f}","1-6":"{:.0f}","7-8":"{:.0f}"}).set_table_attributes('class="tabla-voc"').hide(axis='index')
             st.markdown(tabla_html(st_ap), unsafe_allow_html=True)
             
-            st.download_button("Descargar Tabla APS", data=cached_jpg_gen(ds_ap, 'aps', obj_tre, obj_isc), file_name="Tabla_APS.jpg", mime="image/jpeg", key="dl_aps_gen")
+            boton_descarga_tabla(st, "Descargar Tabla APS", ds_ap, lambda: cached_jpg_gen(ds_ap, 'aps', obj_tre, obj_isc), "Tabla_APS", "dl_aps_gen")
             
             c_t, c_b = st.columns(2)
             validos = df_ap[df_ap["prom_isc"].notna() & np.isfinite(df_ap["prom_isc"]) & (df_ap["aps_nombre"] != "TOTAL GENERAL")]
@@ -1306,7 +1340,7 @@ def render_atributos():
 
         st.markdown(tabla_html(styler_res), unsafe_allow_html=True)
 
-        st.download_button("📥 Descargar Tabla", data=cached_jpg_attr_table(df_resumen, cols_cache), file_name="Atributos.jpg", mime="image/jpeg", key="dl_attr")
+        boton_descarga_tabla(st, "📥 Descargar Tabla", df_resumen, lambda: cached_jpg_attr_table(df_resumen, cols_cache), "Atributos", "dl_attr")
 
 
     with col_rs_der:
@@ -1675,8 +1709,7 @@ def render_pendientes():
     st.markdown(tabla_html(st_p), unsafe_allow_html=True)
     
     if not ds_p.empty:
-        jpg_bytes_pend = cached_jpg_export(ds_p, 'pendientes')
-        st.download_button("Descargar Pendientes", data=jpg_bytes_pend, file_name="Pendientes.jpg", mime="image/jpeg", key="dl_pend")
+        boton_descarga_tabla(st, "Descargar Pendientes", ds_p, lambda: cached_jpg_export(ds_p, 'pendientes'), "Pendientes", "dl_pend")
     st.markdown("</div>",unsafe_allow_html=True)
 
     # --- TABLA 2: RESUMEN POR ASESOR ---
@@ -1714,8 +1747,7 @@ def render_pendientes():
     st.markdown(tabla_html(st_ra), unsafe_allow_html=True)
     
     if not res_a.empty:
-        jpg_bytes_res = cached_jpg_export(res_a, 'resumen')
-        st.download_button("Descargar Resumen", data=jpg_bytes_res, file_name="Resumen_Asesor.jpg", mime="image/jpeg", key="dl_res_asesor")
+        boton_descarga_tabla(st, "Descargar Resumen", res_a, lambda: cached_jpg_export(res_a, 'resumen'), "Resumen_Asesor", "dl_res_asesor")
     st.markdown("</div>",unsafe_allow_html=True)
 
 # ==============================================================================
