@@ -1648,7 +1648,9 @@ def render_pendientes():
     
     if aps_p != "TODOS": df_f = df_f[df_f["aps_nombre"] == aps_p]
 
-    if "filtro_estado_p" not in st.session_state: st.session_state.filtro_estado_p = "TODOS"
+    # Solo se listan pendientes o vencidas (no se muestran las completadas)
+    if st.session_state.get("filtro_estado_p") not in ("Contacto en uso", "Expirado"):
+        st.session_state.filtro_estado_p = "Contacto en uso"
 
     # =========================================================================
     # EXTRACCIÓN DE TOTALES MAESTROS
@@ -1680,22 +1682,25 @@ def render_pendientes():
     k1,k2,k3 = st.columns(3)
     with k1:
         st.markdown(kpi_html("Total Encuestas", tot_env, "{:.0f}"), unsafe_allow_html=True)
-        if st.button("Listar Todos", key="btn_ptod", use_container_width=True): st.session_state.filtro_estado_p = "TODOS"; st.rerun()
     with k2:
         st.markdown(kpi_html("Vencidas", tot_exp, "{:.0f}", color="#D32F2F"), unsafe_allow_html=True)
-        if st.button("Listar Vencidas", key="btn_pexp", use_container_width=True): st.session_state.filtro_estado_p = "Expirado"; st.rerun()
+        if st.button("Listar Vencidas", key="btn_pexp", use_container_width=True,
+                     type="primary" if st.session_state.filtro_estado_p == "Expirado" else "secondary"):
+            st.session_state.filtro_estado_p = "Expirado"; st.rerun()
     with k3:
         st.markdown(kpi_html("Pendientes", tot_pen, "{:.0f}", color="#FF8C00"), unsafe_allow_html=True)
-        if st.button("Listar Pendientes", key="btn_puso", use_container_width=True): st.session_state.filtro_estado_p = "Contacto en uso"; st.rerun()
+        if st.button("Listar Pendientes", key="btn_puso", use_container_width=True,
+                     type="primary" if st.session_state.filtro_estado_p == "Contacto en uso" else "secondary"):
+            st.session_state.filtro_estado_p = "Contacto en uso"; st.rerun()
 
     st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
 
-    df_mostrar = df_f[df_f["status_calc"] == st.session_state.filtro_estado_p] if st.session_state.filtro_estado_p != "TODOS" else df_f.copy()
+    df_mostrar = df_f[df_f["status_calc"] == st.session_state.filtro_estado_p].copy()
 
     # --- TABLA 1: DETALLE DE PENDIENTES ---
     st.markdown("<div class='chart-box'>",unsafe_allow_html=True)
-    titulo_estado = "" if st.session_state.filtro_estado_p == 'TODOS' else f" ({st.session_state.filtro_estado_p.upper()})"
-    st.markdown(f"**DETALLE DE PENDIENTES — {dealer_p} · {CIUDAD}{titulo_estado}**")
+    titulo_estado = "VENCIDAS" if st.session_state.filtro_estado_p == "Expirado" else "PENDIENTES"
+    st.markdown(f"**DETALLE DE {titulo_estado} — {dealer_p} · {CIUDAD}**")
     
     ds_p = df_mostrar[["aps_nombre","cliente_nombre","cliente_celular","cliente_mail","fecha_validez", "status_calc"]].copy()
     ds_p.columns = ["Asesor","Nombre del Cliente","Celular","Mail","Fecha Validez", "Estado"]
