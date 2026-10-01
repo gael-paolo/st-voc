@@ -412,6 +412,10 @@ section[data-testid="stMain"]{background:#F5F6FA!important}
 .alerta-card .ag{font-size:12px;color:#888}
 .table-scroll{overflow-x:auto;border-radius:8px}
 div[data-testid="stSelectbox"] label p{font-weight:700!important;font-size:12px!important;color:#1A1A2E!important;text-transform:uppercase;letter-spacing:0.5px}
+/* Contraste: textos del área principal legibles aunque el navegador use tema oscuro */
+section[data-testid="stMain"] [data-testid="stMarkdownContainer"]{color:#1A1A2E}
+section[data-testid="stMain"] [data-testid="stWidgetLabel"] p{color:#1A1A2E!important;font-weight:700!important}
+section[data-testid="stMain"] [data-testid="stCaptionContainer"],section[data-testid="stMain"] [data-testid="stCaptionContainer"] p{color:#555!important}
 </style>
 """, unsafe_allow_html=True)
 
@@ -443,7 +447,7 @@ def verificar_acceso():
         st.markdown("<div class='seccion-titulo'>Portal VoC Taiyo</div>", unsafe_allow_html=True)
         with st.form("form_acceso"):
             clave = st.text_input("Contraseña:", type="password")
-            entrar = st.form_submit_button("Ingresar", type="primary", use_container_width=True)
+            entrar = st.form_submit_button("Ingresar", type="primary", width="stretch")
         if entrar:
             if hmac.compare_digest(clave.encode("utf-8"), str(clave_app).encode("utf-8")):
                 st.session_state["acceso_ok"] = True
@@ -485,8 +489,353 @@ def aps_para_filtro(ciudad, dealer, fytd=None):
     if dealer != "GENERAL": df = df[df["dealer"]==dealer]
     return ["TODOS"] + sorted(df["aps_nombre"].unique())
 
+# ==============================================================================
+# SECCIÓN KAIZEN: ALERTAS POR CORREO A LOS APS
+# ==============================================================================
+import html as _html
+import smtplib
+import streamlit.components.v1 as components
+import unicodedata as _ud
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.utils import formataddr
+
+RUTA_DIRECTORIO_APS = "config/directorio_aps.csv"   # columnas: aps_nombre, email
+RUTA_LOG_ENVIOS     = "config/log_envios_kaizen.csv"
+
+def _norm_nombre(txt):
+    """Normaliza nombres para cruzar el directorio con los datos (mayúsculas, sin tildes ni espacios extra)."""
+    t = _ud.normalize("NFKD", str(txt)).encode("ascii", "ignore").decode("ascii")
+    return " ".join(t.upper().split())
+
+def _bucket_gcs():
+    credentials = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"])
+    return storage.Client(credentials=credentials).bucket("bk_voc")
+
+@st.cache_data(ttl=600, show_spinner=False)
+def cargar_directorio_aps():
+    """Lee el directorio de correos de los APS desde GCS. Devuelve {nombre_normalizado: email}."""
+    try:
+        blob = _bucket_gcs().blob(RUTA_DIRECTORIO_APS)
+        if not blob.exists():
+            return {}, f"No se encontró gs://bk_voc/{RUTA_DIRECTORIO_APS}"
+        df = pd.read_csv(io.BytesIO(blob.download_as_bytes()), dtype=str)
+    except Exception as e:
+        return {}, f"No se pudo leer el directorio: {e}"
+    cols = {c.strip().lower(): c for c in df.columns}
+    if "aps_nombre" not in cols or "email" not in cols:
+        return {}, "El directorio debe tener las columnas: aps_nombre, email"
+    df = df.rename(columns={cols["aps_nombre"]: "aps_nombre", cols["email"]: "email"})
+    df = df.dropna(subset=["aps_nombre", "email"])
+    df["email"] = df["email"].str.strip()
+    df = df[df["email"].str.contains("@", na=False)]
+    return {_norm_nombre(n): e for n, e in zip(df["aps_nombre"], df["email"])}, ""
+
+def registrar_envios_gcs(registros):
+    """Agrega los envíos al log en GCS. Si falla, no interrumpe el envío."""
+    try:
+        blob = _bucket_gcs().blob(RUTA_LOG_ENVIOS)
+        df_new = pd.DataFrame(registros)
+        if blob.exists():
+            df_old = pd.read_csv(io.BytesIO(blob.download_as_bytes()), dtype=str)
+            df_new = pd.concat([df_old, df_new], ignore_index=True)
+        blob.upload_from_string(df_new.to_csv(index=False), content_type="text/csv")
+        return True
+    except Exception:
+        return False
+
+def periodo_mes_actual(ciudad):
+    """Último FYTD y último mes con datos de APS."""
+    if not todos_fytd: return None, None
+    fytd = todos_fytd[0]
+    meses = meses_de(D["isc_aps"], fytd, ciudad)
+    return fytd, (meses[-1] if meses else None)
+
+def resumen_aps(aps, fytd, mes, ciudad):
+    """Calcula los datos del correo de un APS con la misma lógica que Vista APS."""
+    meses_proc = [mes]
+    df_tre = filtrar(D["tre_aps"], fytd=fytd, ciudad=ciudad, aps=aps)
+    df_isc = filtrar(D["isc_aps"], fytd=fytd, ciudad=ciudad, aps=aps)
+    df_tre = df_tre[df_tre["mes_anio"].isin(meses_proc)] if not df_tre.empty else df_tre
+    df_isc = df_isc[df_isc["mes_anio"].isin(meses_proc)] if not df_isc.empty else df_isc
+
+    obj_tre = get_obj(D["objetivos"], fytd, "obj_tre")
+    obj_isc = get_obj(D["objetivos"], fytd, "obj_isc")
+
+    e_tot = df_tre["E"].sum() if not df_tre.empty else 0
+    c_tot = df_tre["C"].sum() if not df_tre.empty else 0
+    tre_val = c_tot / e_tot if e_tot > 0 else 0
+    enc_tot = df_isc["total_encuestas"].sum() if not df_isc.empty else 0
+    pen = (df_isc["I16"].sum()*2 + df_isc["I78"].sum()) if not df_isc.empty else 0
+    isc_val = (enc_tot - pen) / enc_tot if enc_tot > 0 else 0
+
+    # Contactos en uso (vigentes y vencidos)
+    df_p = aplicar_filtro_ciudad(D["pendientes"], ciudad)
+    if {"aps_nombre", "status", "fecha_validez"}.issubset(df_p.columns):
+        df_p = df_p[(df_p["aps_nombre"] == aps) & (df_p["status"] == "Contacto en uso")]
+        df_p = df_p.drop_duplicates(subset=[c for c in ["cliente_nombre", "cliente_celular"] if c in df_p.columns])
+    else:
+        df_p = pd.DataFrame(columns=["cliente_nombre", "cliente_celular", "fecha_validez"])
+    fv = pd.to_datetime(df_p["fecha_validez"], format='mixed', dayfirst=True, errors='coerce')
+    vencido = fv < pd.Timestamp.today().normalize()
+    contactos = pd.DataFrame({
+        "cliente": df_p["cliente_nombre"].astype(str).values if "cliente_nombre" in df_p.columns else [],
+        "celular": df_p["cliente_celular"].astype(str).str.replace(".0", "", regex=False).replace({"nan": "—"}).values if "cliente_celular" in df_p.columns else [],
+        "vence":   (fv - pd.Timedelta(days=1)).dt.strftime('%d/%m/%Y').fillna("—").values,
+        "vencido": vencido.values,
+        "_orden":  fv.values,
+    }).sort_values(["vencido", "_orden"]).drop(columns="_orden")
+    vivas = int((~vencido).sum()); vencidas = int(vencido.sum())
+
+    # Proyección para llegar a la meta ISC
+    req = (pen / (1 - obj_isc)) - enc_tot if (isc_val < obj_isc and obj_isc < 1) else 0
+    fal = max(1, int(np.ceil(req))) if req > 0 else 0
+    if enc_tot == 0:
+        msg, msg_color = "Aún no tienes encuestas ISC registradas este mes.", "#555555"
+    elif isc_val >= obj_isc:
+        msg, msg_color = f"¡Felicidades! Superaste la meta ISC del {obj_isc:.0%}. Mantén la calidad.", "#2E7D32"
+    elif fal <= vivas:
+        msg, msg_color = f"Necesitas que {fal} de tus {vivas} encuestas pendientes cierren con calificación perfecta (10) para llegar al {obj_isc:.0%}.", "#F57F17"
+    else:
+        msg, msg_color = f"Necesitas {fal} encuestas perfectas, pero solo tienes {vivas} disponibles por llamar.", "#D32F2F"
+
+    # Foco de mejora (Top 3), misma regla que Vista APS
+    df_at = filtrar(D["atrib_aps"], fytd=fytd, ciudad=ciudad, aps=aps)
+    df_at = df_at[df_at["mes_anio"].isin(meses_proc)] if not df_at.empty else df_at
+    fort, aler = [], []
+    if not df_at.empty:
+        for attr, g in df_at.groupby("atributo"):
+            if "bien a la primera" in str(attr).lower(): continue
+            v = (g["pct_score"]*g["n_respuestas"]).sum()/g["n_respuestas"].sum() if ("n_respuestas" in g.columns and g["n_respuestas"].sum() > 0) else g["pct_score"].mean()
+            m = g["obj_atributo"].mean() / 100.0 if g["obj_atributo"].mean() > 2 else g["obj_atributo"].mean()
+            (fort if v >= m else aler).append({"attr": attr, "val": v, "meta": m})
+    fort = sorted(fort, key=lambda x: x["val"], reverse=True)[:3]
+    aler = sorted(aler, key=lambda x: x["val"])[:3]
+
+    return {"aps": aps, "fytd": fytd, "mes": mes, "e_tot": int(e_tot), "c_tot": int(c_tot),
+            "tre": tre_val, "obj_tre": obj_tre, "enc_tot": int(enc_tot), "isc": isc_val, "obj_isc": obj_isc,
+            "vivas": vivas, "vencidas": vencidas, "contactos": contactos,
+            "msg": msg, "msg_color": msg_color, "fort": fort, "aler": aler}
+
+def _color_kpi(val, obj):
+    if val >= obj: return "#388E3C"
+    if val >= obj - 0.03: return "#F57F17"
+    return "#D32F2F"
+
+def html_correo_aps(r):
+    """Arma el correo HTML (estilos en línea, compatible con Gmail/Outlook)."""
+    e = _html.escape
+    kpi = lambda tit, val, sub, color: f"""
+      <td width="33%" style="padding:6px;"><table width="100%" cellpadding="0" cellspacing="0" style="background:#FFFFFF;border-top:4px solid #1A1A2E;border-radius:8px;">
+        <tr><td align="center" style="padding:12px 6px 2px;font:700 11px Arial,sans-serif;color:#666;text-transform:uppercase;letter-spacing:1px;">{tit}</td></tr>
+        <tr><td align="center" style="font:900 28px Arial,sans-serif;color:{color};">{val}</td></tr>
+        <tr><td align="center" style="padding:2px 6px 12px;font:12px Arial,sans-serif;color:#999;">{sub}</td></tr></table></td>"""
+    filas = ""
+    for _, c in r["contactos"].iterrows():
+        est = ("<span style='color:#D32F2F;font-weight:bold;'>Vencido</span>" if c["vencido"]
+               else "<span style='color:#F57F17;font-weight:bold;'>Pendiente</span>")
+        filas += (f"<tr><td style='padding:6px 8px;border-bottom:1px solid #EEE;font:13px Arial,sans-serif;'>{e(c['cliente'])}</td>"
+                  f"<td style='padding:6px 8px;border-bottom:1px solid #EEE;font:13px Arial,sans-serif;'>{e(c['celular'])}</td>"
+                  f"<td align='center' style='padding:6px 8px;border-bottom:1px solid #EEE;font:13px Arial,sans-serif;'>{e(c['vence'])}</td>"
+                  f"<td align='center' style='padding:6px 8px;border-bottom:1px solid #EEE;font:13px Arial,sans-serif;'>{est}</td></tr>")
+    if not filas:
+        tabla_contactos = "<p style='font:14px Arial,sans-serif;color:#2E7D32;'>¡Sin contactos en uso! Buen trabajo.</p>"
+    else:
+        tabla_contactos = f"""<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#FFFFFF;">
+          <tr style="background:#1A1A2E;"><th align="left" style="padding:8px;font:700 12px Arial,sans-serif;color:#FFF;">Cliente</th>
+          <th align="left" style="padding:8px;font:700 12px Arial,sans-serif;color:#FFF;">Celular</th>
+          <th style="padding:8px;font:700 12px Arial,sans-serif;color:#FFF;">Vence</th>
+          <th style="padding:8px;font:700 12px Arial,sans-serif;color:#FFF;">Estado</th></tr>{filas}</table>"""
+
+    def bloque_focos(lista, titulo, color, fondo, borde):
+        if not lista:
+            return f"<p style='font:13px Arial,sans-serif;color:#777;margin:4px 0;'>Sin datos este mes.</p>" if titulo else ""
+        return "".join(f"""<div style="background:{fondo};border-left:5px solid {borde};padding:8px 10px;margin-bottom:6px;border-radius:4px;">
+            <span style="font:700 13px Arial,sans-serif;color:#000;">{e(str(x['attr']))}</span><br>
+            <span style="font:900 18px Arial,sans-serif;color:#000;">{x['val']:.1%}</span>
+            <span style="font:700 12px Arial,sans-serif;color:#444;">(Meta: {x['meta']:.0%})</span></div>""" for x in lista)
+
+    return f"""<!doctype html><html><body style="margin:0;background:#F5F6FA;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#F5F6FA;"><tr><td align="center" style="padding:16px;">
+<table width="640" cellpadding="0" cellspacing="0" style="max-width:640px;width:100%;">
+  <tr><td style="background:#1A1A2E;padding:16px 20px;border-bottom:4px solid #FFD600;">
+    <div style="font:900 20px Arial,sans-serif;color:#FFFFFF;letter-spacing:1px;">VOC INSIGHTS · TAIYO MOTORS</div>
+    <div style="font:14px Arial,sans-serif;color:#E0E0E0;margin-top:4px;">Resultados de <b>{e(r['aps'])}</b> — {e(str(r['mes']))} ({e(str(r['fytd']))})</div></td></tr>
+  <tr><td style="padding:14px 4px 0;"><table width="100%" cellpadding="0" cellspacing="0"><tr>
+    {kpi("Encuestas enviadas", f"{r['e_tot']}", f"Meta TRE: {r['obj_tre']:.0%}", "#1A1A2E")}
+    {kpi("TRE", f"{r['tre']:.1%}", f"Meta: {r['obj_tre']:.0%}", _color_kpi(r['tre'], r['obj_tre']))}
+    {kpi("ISC", f"{r['isc']:.1%}", f"Meta: {r['obj_isc']:.0%}", _color_kpi(r['isc'], r['obj_isc']))}
+  </tr></table></td></tr>
+  <tr><td style="padding:8px 10px;"><div style="background:#FFFFFF;border-left:5px solid {r['msg_color']};padding:10px 12px;font:14px Arial,sans-serif;color:{r['msg_color']};">{e(r['msg'])}</div></td></tr>
+  <tr><td style="padding:12px 10px 4px;font:900 16px Arial,sans-serif;color:#1A1A2E;">Contactos en uso ({r['vivas']} pendientes · {r['vencidas']} vencidos)</td></tr>
+  <tr><td style="padding:0 10px;">{tabla_contactos}</td></tr>
+  <tr><td style="padding:16px 10px 4px;font:900 16px Arial,sans-serif;color:#1A1A2E;">Foco de mejora (Top 3 atributos)</td></tr>
+  <tr><td style="padding:0 10px;"><table width="100%" cellpadding="0" cellspacing="0"><tr>
+    <td width="50%" valign="top" style="padding-right:6px;"><div style="font:700 14px Arial,sans-serif;color:#2E7D32;margin-bottom:6px;">Fortalezas</div>{bloque_focos(r['fort'], 'f', '#2E7D32', '#E8F5E9', '#4CAF50')}</td>
+    <td width="50%" valign="top" style="padding-left:6px;"><div style="font:700 14px Arial,sans-serif;color:#C62828;margin-bottom:6px;">Por mejorar</div>{bloque_focos(r['aler'], 'a', '#C62828', '#FFEBEE', '#F44336')}</td>
+  </tr></table></td></tr>
+  <tr><td style="padding:18px 10px;font:12px Arial,sans-serif;color:#888;">Correo enviado por el área de Calidad (Kaizen). Información confidencial: contiene datos de clientes solo para tu gestión.</td></tr>
+</table></td></tr></table></body></html>"""
+
+def texto_correo_aps(r):
+    lineas = [f"Resultados de {r['aps']} — {r['mes']} ({r['fytd']})", "",
+              f"Encuestas enviadas: {r['e_tot']}", f"TRE: {r['tre']:.1%} (meta {r['obj_tre']:.0%})",
+              f"ISC: {r['isc']:.1%} (meta {r['obj_isc']:.0%})", "", r["msg"], "",
+              f"Contactos en uso: {r['vivas']} pendientes, {r['vencidas']} vencidos"]
+    for _, c in r["contactos"].iterrows():
+        lineas.append(f"- {c['cliente']} | {c['celular']} | vence {c['vence']}{' (VENCIDO)' if c['vencido'] else ''}")
+    lineas += ["", "Fortalezas:"] + [f"- {x['attr']}: {x['val']:.1%} (meta {x['meta']:.0%})" for x in r["fort"]]
+    lineas += ["", "Por mejorar:"] + [f"- {x['attr']}: {x['val']:.1%} (meta {x['meta']:.0%})" for x in r["aler"]]
+    return "\n".join(lineas)
+
+def config_gmail():
+    try:
+        g = st.secrets["gmail"]
+        user, pwd = g.get("user"), g.get("app_password")
+        cc = g.get("cc", user); nombre = g.get("nombre", "Calidad VoC Taiyo")
+    except Exception:
+        return None
+    if not user or not pwd: return None
+    return {"user": user, "pwd": str(pwd).replace(" ", ""), "cc": cc, "nombre": nombre}
+
+def enviar_correos(lote, cfg):
+    """lote: lista de (destinatario, cc, asunto, html, texto). Devuelve lista de (destinatario, ok, detalle)."""
+    resultados = []
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as srv:
+        srv.login(cfg["user"], cfg["pwd"])
+        for dest, cc, asunto, cuerpo_html, cuerpo_txt in lote:
+            try:
+                msg = MIMEMultipart("alternative")
+                msg["Subject"] = asunto
+                msg["From"] = formataddr((cfg["nombre"], cfg["user"]))
+                msg["To"] = dest
+                if cc and cc.lower() != dest.lower(): msg["Cc"] = cc
+                msg.attach(MIMEText(cuerpo_txt, "plain", "utf-8"))
+                msg.attach(MIMEText(cuerpo_html, "html", "utf-8"))
+                rcpts = [dest] + ([cc] if cc and cc.lower() != dest.lower() else [])
+                srv.sendmail(cfg["user"], rcpts, msg.as_string())
+                resultados.append((dest, True, "Enviado"))
+            except Exception as ex:
+                resultados.append((dest, False, str(ex)[:120]))
+    return resultados
+
+def render_kaizen_alertas():
+    st.markdown("<div class='seccion-titulo'>Kaizen — Alertas por correo a los APS</div>", unsafe_allow_html=True)
+
+    cfg = config_gmail()
+    if cfg is None:
+        st.error("Falta configurar la cuenta de Gmail en los secrets (sección [gmail] con user y app_password).")
+        return
+
+    fytd, mes = periodo_mes_actual(CIUDAD)
+    if not mes:
+        st.info("No hay datos de APS para el periodo actual."); return
+
+    directorio, err_dir = cargar_directorio_aps()
+    if err_dir: st.warning(err_dir)
+
+    aps_lista = [a for a in aps_para_filtro(CIUDAD, "GENERAL", fytd) if a != "TODOS" and "SIN ASESOR" not in str(a).upper()]
+    df_dir = pd.DataFrame({"APS": aps_lista})
+    df_dir["Correo"] = [directorio.get(_norm_nombre(a), "") for a in aps_lista]
+    con_correo = df_dir[df_dir["Correo"] != ""]["APS"].tolist()
+    sin_correo = df_dir[df_dir["Correo"] == ""]["APS"].tolist()
+
+    k1, k2, k3 = st.columns(3)
+    with k1: st.markdown(kpi_html("Periodo del correo", mes, "{}", f"Último mes · {fytd}"), unsafe_allow_html=True)
+    with k2: st.markdown(kpi_html("APS con correo", len(con_correo), "{:.0f}", f"de {len(aps_lista)} asesores", color="#388E3C"), unsafe_allow_html=True)
+    with k3: st.markdown(kpi_html("APS sin correo", len(sin_correo), "{:.0f}", "Agrégalos al directorio", color="#D32F2F" if sin_correo else "#1A1A2E"), unsafe_allow_html=True)
+    st.caption(f"Copia (CC) de cada correo: {cfg['cc']} · Directorio: gs://bk_voc/{RUTA_DIRECTORIO_APS}")
+    if sin_correo:
+        with st.expander(f"Ver {len(sin_correo)} APS sin correo en el directorio"):
+            st.write(", ".join(sin_correo))
+
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+    seleccion = st.multiselect("Asesores a notificar:", con_correo, default=con_correo, key="kz_sel")
+
+    # --- Vista previa ---
+    st.markdown("<h5 style='color:#1A1A2E; margin-top:15px; font-weight:bold;'>Vista previa</h5>", unsafe_allow_html=True)
+    aps_prev = st.selectbox("Ver el correo de:", seleccion or aps_lista, key="kz_prev")
+    r_prev = resumen_aps(aps_prev, fytd, mes, CIUDAD)
+    if hasattr(st, "iframe"):
+        st.iframe(html_correo_aps(r_prev), height=900)
+    else:
+        components.html(html_correo_aps(r_prev), height=900, scrolling=True)
+
+    asunto_tpl = "VoC Taiyo · Tus resultados {mes} — {aps}"
+
+    # --- Envío de prueba ---
+    c_p, c_e = st.columns(2)
+    with c_p:
+        if st.button(f"Enviar prueba a {cfg['user']}", key="kz_test", width="stretch"):
+            try:
+                res = enviar_correos([(cfg["user"], None, "[PRUEBA] " + asunto_tpl.format(mes=mes, aps=aps_prev),
+                                       html_correo_aps(r_prev), texto_correo_aps(r_prev))], cfg)
+                st.success("Prueba enviada.") if res[0][1] else st.error(f"Error: {res[0][2]}")
+            except Exception as ex:
+                st.error(f"No se pudo conectar con Gmail: {ex}")
+
+    # --- Envío real ---
+    with c_e:
+        if st.session_state.get("kz_ultimo_envio") == f"{mes}|{fytd}":
+            st.warning(f"Ya enviaste los correos de {mes} en esta sesión.")
+        confirmar = st.checkbox(f"Confirmo el envío a {len(seleccion)} asesores ({mes})",
+                                key=f"kz_conf_{st.session_state.get('kz_n_envios', 0)}")
+        enviar = st.button(f"Enviar a {len(seleccion)} asesores", key="kz_send", type="primary",
+                           width="stretch", disabled=not (confirmar and seleccion))
+    if enviar:
+        lote = []
+        for a in seleccion:
+            r = resumen_aps(a, fytd, mes, CIUDAD)
+            lote.append((directorio[_norm_nombre(a)], cfg["cc"], asunto_tpl.format(mes=mes, aps=a),
+                         html_correo_aps(r), texto_correo_aps(r)))
+        with st.spinner(f"Enviando {len(lote)} correos..."):
+            try:
+                res = enviar_correos(lote, cfg)
+            except Exception as ex:
+                st.error(f"No se pudo conectar con Gmail: {ex}"); return
+        ahora = pd.Timestamp.now(tz="America/La_Paz").strftime("%Y-%m-%d %H:%M")
+        df_res = pd.DataFrame([{"APS": a, "Correo": d, "Resultado": det} for a, (d, ok, det) in zip(seleccion, res)])
+        ok_n = sum(1 for _, ok, _ in res if ok)
+        (st.success if ok_n == len(res) else st.warning)(f"Enviados {ok_n} de {len(res)} correos.")
+        st.markdown(tabla_html(df_res.style.hide(axis="index").set_table_attributes('class="tabla-voc"')), unsafe_allow_html=True)
+        registrar_envios_gcs([{"fecha": ahora, "periodo": f"{mes} {fytd}", "aps": a, "email": d, "resultado": det}
+                              for a, (d, ok, det) in zip(seleccion, res)])
+        st.session_state["kz_ultimo_envio"] = f"{mes}|{fytd}"
+        st.session_state["kz_n_envios"] = st.session_state.get("kz_n_envios", 0) + 1
+
+def verificar_acceso_kaizen():
+    """Segunda contraseña para el perfil Kaizen (st.secrets['kaizen_password'])."""
+    if st.session_state.get("acceso_kaizen"):
+        return
+    try:
+        clave_kz = st.secrets.get("kaizen_password")
+    except Exception:
+        clave_kz = None
+    st.markdown("<style>[data-testid='stSidebar'],[data-testid='collapsedControl']{display:none!important}</style>", unsafe_allow_html=True)
+    _, c_login, _ = st.columns([1, 1.2, 1])
+    with c_login:
+        st.markdown("<div style='height:12vh'></div>", unsafe_allow_html=True)
+        st.markdown("<div class='seccion-titulo'>Vista Kaizen</div>", unsafe_allow_html=True)
+        if not clave_kz:
+            st.error("Falta configurar kaizen_password en los secrets.")
+        else:
+            with st.form("form_kaizen"):
+                clave = st.text_input("Contraseña Kaizen:", type="password")
+                entrar = st.form_submit_button("Ingresar", type="primary", width="stretch")
+            if entrar:
+                if hmac.compare_digest(clave.encode("utf-8"), str(clave_kz).encode("utf-8")):
+                    st.session_state["acceso_kaizen"] = True
+                    st.rerun()
+                else:
+                    st.error("Contraseña incorrecta.")
+        if st.button("Volver al inicio", key="kz_volver"):
+            st.session_state.perfil = None; st.session_state.seccion = "caratula"; st.rerun()
+    st.stop()
+
 sec = st.session_state.seccion
 perfil = st.session_state.perfil
+if perfil == "KAIZEN":
+    verificar_acceso_kaizen()
 
 if sec != "caratula":
     with st.sidebar:
@@ -495,10 +844,11 @@ if sec != "caratula":
         if st.button("INICIO", key="nav_ini"):  
             st.session_state.seccion = "caratula"
             st.session_state.perfil = None
+            st.session_state.acceso_kaizen = False
             st.rerun()
         st.markdown("<hr>", unsafe_allow_html=True)
         
-        if perfil == "GENERAL":
+        if perfil in ("GENERAL", "KAIZEN"):
             st.markdown("<div style='padding:8px 16px;font-size:11px;color:#666;letter-spacing:1px;font-weight:700'>MEDICIÓN</div>", unsafe_allow_html=True)
             if st.button("GENERAL",         key="nav_gen"):  st.session_state.seccion="general"
             if st.button("ATRIBUTOS",       key="nav_atr"):  st.session_state.seccion="atributos"
@@ -511,8 +861,12 @@ if sec != "caratula":
             st.markdown("<hr>", unsafe_allow_html=True)
             st.markdown("<div style='padding:8px 16px;font-size:11px;color:#666;letter-spacing:1px;font-weight:700'>MI PERFIL</div>", unsafe_allow_html=True)
             if st.button("VISTA APS", key="nav_aps"): st.session_state.seccion="vista_aps"
+            if perfil == "KAIZEN":
+                st.markdown("<hr>", unsafe_allow_html=True)
+                st.markdown("<div style='padding:8px 16px;font-size:11px;color:#666;letter-spacing:1px;font-weight:700'>KAIZEN</div>", unsafe_allow_html=True)
+                if st.button("ALERTAS POR CORREO", key="nav_kz"): st.session_state.seccion="kaizen_alertas"
             st.markdown("<hr>", unsafe_allow_html=True)
-            # Solo el perfil General puede recargar los datos.
+            # Solo los perfiles General y Kaizen pueden recargar los datos.
             # Se limpia únicamente la caché de cargar_datos (no la de imágenes ni gráficos).
             if st.button("Recargar datos", key="nav_rel"):
                 cargar_datos.clear()
@@ -595,11 +949,11 @@ def render_general():
     if "gen_acum" not in st.session_state: st.session_state.gen_acum = False
     with col4:
         st.markdown("<div style='margin-top:28px'></div>",unsafe_allow_html=True)
-        if st.button("Cargar",key="g_btn",use_container_width=True,type="primary"):
+        if st.button("Cargar",key="g_btn",width="stretch",type="primary"):
             st.session_state.gen_acum = False; st.rerun()
     with col5:
         st.markdown("<div style='margin-top:28px'></div>",unsafe_allow_html=True)
-        if st.button("ACUM",key="g_btn_acum",use_container_width=True):
+        if st.button("ACUM",key="g_btn_acum",width="stretch"):
             st.session_state.gen_acum = True; st.rerun()
 
     if mes_sel == "TODOS": meses_a_procesar = mm
@@ -880,10 +1234,10 @@ def render_tendencia():
     with c2: dealer_sel = st.selectbox("Filtro Dealer:", dealers_para_ciudad(CIUDAD), key="t_dlr")
     with c3:
         st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
-        btn_gen  = st.button("Generar", key="t_btn",  use_container_width=True, type="primary")
+        btn_gen  = st.button("Generar", key="t_btn",  width="stretch", type="primary")
     with c4:
         st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
-        btn_acum = st.button("ACUM",    key="t_acum", use_container_width=True)
+        btn_acum = st.button("ACUM",    key="t_acum", width="stretch")
 
     if "tend_params" not in st.session_state: st.session_state.tend_params = {}
     if btn_gen or btn_acum: st.session_state.tend_params = {"fytd": fytd_sel, "dealer": dealer_sel, "acum": btn_acum, "ciudad": CIUDAD}
@@ -941,7 +1295,7 @@ def render_tendencia():
     img_bytes = cached_plot_tendencia(meses_ord, totales, prom_vals, series_sec, colores_sec, markers_sec, obj_isc, lbl_prom, titulo, lbl_enc)
 
     st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
-    st.image(img_bytes, use_container_width=True)
+    st.image(img_bytes, width="stretch")
     st.download_button("Descargar Gráfica ISC", data=img_bytes, file_name="Tendencia_ISC.jpg", mime="image/jpeg", key="dl_tend")
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1124,7 +1478,7 @@ def render_atributos():
 
         st.markdown("<div style='margin-top:28px'></div>",unsafe_allow_html=True)
 
-        if st.button("Cargar",key="a_btn",use_container_width=True,type="primary"):
+        if st.button("Cargar",key="a_btn",width="stretch",type="primary"):
 
             st.session_state.atr_acum = False; st.rerun()
 
@@ -1132,7 +1486,7 @@ def render_atributos():
 
         st.markdown("<div style='margin-top:28px'></div>",unsafe_allow_html=True)
 
-        if st.button("ACUM",key="a_btn_acum",use_container_width=True):
+        if st.button("ACUM",key="a_btn_acum",width="stretch"):
 
             st.session_state.atr_acum = True; st.rerun()
 
@@ -1525,7 +1879,7 @@ def render_atributos():
 
     st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
 
-    st.image(img_bytes, use_container_width=True)
+    st.image(img_bytes, width="stretch")
 
     st.download_button("📥 Descargar Gráfica Completa", data=img_bytes, file_name=f"Tendencia_{atr_hist_sel}.jpg", mime="image/jpeg", key="dl_hist_full")
 
@@ -1553,11 +1907,11 @@ def render_radial():
     if "rad_acum" not in st.session_state: st.session_state.rad_acum = False
     with c4:
         st.markdown("<div style='margin-top:28px'></div>",unsafe_allow_html=True)
-        if st.button("Cargar",key="r_btn",use_container_width=True,type="primary"):
+        if st.button("Cargar",key="r_btn",width="stretch",type="primary"):
             st.session_state.rad_acum = False; st.rerun()
     with c5:
         st.markdown("<div style='margin-top:28px'></div>",unsafe_allow_html=True)
-        if st.button("ACUM",key="r_btn_acum",use_container_width=True):
+        if st.button("ACUM",key="r_btn_acum",width="stretch"):
             st.session_state.rad_acum = True; st.rerun()
 
     if D["atributos"].empty or (mes_sel=="TODOS" and not meses_r): st.info("Sin datos."); return
@@ -1641,7 +1995,7 @@ def render_radial():
     ax.legend(loc="lower center",bbox_to_anchor=(0.5,-0.15),fontsize=9,frameon=True,facecolor="white",edgecolor="#CCC", ncol=3)
 
     st.markdown("<div class='chart-box'>",unsafe_allow_html=True)
-    _,col_c,_=st.columns([0.1,2.8,0.1]); col_c.pyplot(fig,transparent=False)
+    _,col_c,_=st.columns([0.1,2.8,0.1]); col_c.pyplot(fig)
     st.download_button("Descargar Radial", data=fig_to_buf(fig), file_name="Radial.jpg", mime="image/jpeg", key="dl_rad")
     st.markdown("</div>",unsafe_allow_html=True)
 
@@ -1722,12 +2076,12 @@ def render_pendientes():
         st.markdown(kpi_html("Total Encuestas", tot_env, "{:.0f}"), unsafe_allow_html=True)
     with k2:
         st.markdown(kpi_html("Vencidas", tot_exp, "{:.0f}", color="#D32F2F"), unsafe_allow_html=True)
-        if st.button("Listar Vencidas", key="btn_pexp", use_container_width=True,
+        if st.button("Listar Vencidas", key="btn_pexp", width="stretch",
                      type="primary" if st.session_state.filtro_estado_p == "Expirado" else "secondary"):
             st.session_state.filtro_estado_p = "Expirado"; st.rerun()
     with k3:
         st.markdown(kpi_html("Pendientes", tot_pen, "{:.0f}", color="#FF8C00"), unsafe_allow_html=True)
-        if st.button("Listar Pendientes", key="btn_puso", use_container_width=True,
+        if st.button("Listar Pendientes", key="btn_puso", width="stretch",
                      type="primary" if st.session_state.filtro_estado_p == "Contacto en uso" else "secondary"):
             st.session_state.filtro_estado_p = "Contacto en uso"; st.rerun()
 
@@ -1744,6 +2098,9 @@ def render_pendientes():
     ds_p.columns = ["Asesor","Nombre del Cliente","Celular","Mail","Fecha Validez", "Estado"]
     ds_p = ds_p.sort_values("Asesor").reset_index(drop=True)
     ds_p["Celular"] = ds_p["Celular"].astype(str).str.replace(".0","",regex=False)
+    # Vacíos ("nan", "None", "") se muestran como guion
+    for _col in ("Celular", "Mail"):
+        ds_p[_col] = ds_p[_col].astype(str).str.strip().replace({"nan": "—", "None": "—", "NaN": "—", "": "—"})
     _fv_dt = pd.to_datetime(ds_p["Fecha Validez"], format='mixed', dayfirst=True, errors='coerce')
     _mask_uso = ds_p["Estado"].isin(["Contacto en uso", "Expirado"])
     ds_p.loc[_mask_uso, "Fecha Validez"] = (_fv_dt[_mask_uso] - pd.Timedelta(days=1)).dt.strftime('%d/%m/%Y')
@@ -1836,12 +2193,12 @@ def render_verbalizaciones():
 
     with c3:
         st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
-        if st.button("Cargar", key="v_btn", use_container_width=True, type="primary"):
+        if st.button("Cargar", key="v_btn", width="stretch", type="primary"):
             st.session_state.ver_acum = False
             st.rerun()
     with c4:
         st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
-        if st.button("ACUM", key="v_btn_acum", use_container_width=True):
+        if st.button("ACUM", key="v_btn_acum", width="stretch"):
             st.session_state.ver_acum = True
             st.rerun()
 
@@ -1931,7 +2288,7 @@ def render_verbalizaciones():
     plt.tight_layout()
 
     buf1 = fig_to_buf(fig1)
-    st.image(buf1, use_container_width=True)
+    st.image(buf1, width="stretch")
     st.download_button("Descargar Mapa de Impacto",
                        data=buf1.getvalue(),
                        file_name=f"Impacto_Verbalizaciones_{label_periodo}.jpg",
@@ -1964,7 +2321,7 @@ def render_verbalizaciones():
     plt.tight_layout()
 
     buf2 = fig_to_buf(fig2)
-    st.image(buf2, use_container_width=True)
+    st.image(buf2, width="stretch")
     st.download_button("Descargar Ranking de Temas",
                        data=buf2.getvalue(),
                        file_name=f"Ranking_Verbalizaciones_{label_periodo}.jpg",
@@ -2001,7 +2358,7 @@ def render_vista_aps():
     if "aps_acum" not in st.session_state: st.session_state.aps_acum = False
     with c4:
         st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
-        if st.button("ACUM", key="btn_aps_acum", use_container_width=True, type="primary" if st.session_state.aps_acum else "secondary"):
+        if st.button("ACUM", key="btn_aps_acum", width="stretch", type="primary" if st.session_state.aps_acum else "secondary"):
             st.session_state.aps_acum = not st.session_state.aps_acum
             st.rerun()
 
@@ -2066,7 +2423,14 @@ def render_vista_aps():
 
     with c_kpi:
         penalties = df_isc_sel["I16"].sum()*2 + df_isc_sel["I78"].sum()
-        vivas = len(aplicar_filtro_ciudad(D["pendientes"], CIUDAD).query(f"aps_nombre=='{aps_sel}' and status=='Contacto en uso'"))
+        # Pendientes vigentes del asesor (contacto en uso y aún no vencidas), misma lógica que la sección Pendientes
+        _pend_aps = aplicar_filtro_ciudad(D["pendientes"], CIUDAD)
+        if {"aps_nombre", "status", "fecha_validez"}.issubset(_pend_aps.columns):
+            _pend_aps = _pend_aps[(_pend_aps["aps_nombre"] == aps_sel) & (_pend_aps["status"] == "Contacto en uso")]
+        else:
+            _pend_aps = pd.DataFrame(columns=["cliente_nombre", "cliente_celular", "fecha_validez"])
+        _venc_aps = pd.to_datetime(_pend_aps["fecha_validez"], format='mixed', dayfirst=True, errors='coerce') < pd.Timestamp.today().normalize()
+        vivas = int((~_venc_aps).sum())
         req = (penalties / (1 - obj_isc)) - enc_tot if isc_val < obj_isc else 0
         fal = max(1, int(np.ceil(req))) if req > 0 else 0
         
@@ -2101,7 +2465,7 @@ def render_vista_aps():
     # 2. GESTIÓN Y AGENDA
     # =========================================================================
     st.markdown("<h5 style='color:#1A1A2E; margin-top:25px; font-weight:bold;'>Gestión de Encuestas y Agenda</h5>", unsafe_allow_html=True)
-    exp = len(aplicar_filtro_ciudad(D["pendientes"], CIUDAD).query(f"aps_nombre=='{aps_sel}' and status=='Contacto en uso' and fecha_validez < '{pd.Timestamp.today().normalize()}'"))
+    exp = int(_venc_aps.sum())  # contacto en uso con fecha de validez ya pasada
     i1, i2, i3 = st.columns(3)
     with i1: st.markdown(kpi_html("Llenadas", c_tot, "{:.0f}", "Éxito", color="#388E3C"), unsafe_allow_html=True)
     with i2: st.markdown(kpi_html("Vencidas", exp, "{:.0f}", "Pérdida", color="#D32F2F"), unsafe_allow_html=True)
@@ -2109,7 +2473,7 @@ def render_vista_aps():
 
     st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
     st.markdown("<h4 style='color:#1A1A2E; font-weight:bold;'>Agenda Activa: Clientes a contactar ahora</h4>", unsafe_allow_html=True)
-    df_p_show = aplicar_filtro_ciudad(D["pendientes"], CIUDAD).query(f"aps_nombre=='{aps_sel}' and status=='Contacto en uso'")[["cliente_nombre", "cliente_celular", "fecha_validez"]].copy()
+    df_p_show = _pend_aps.loc[~_venc_aps, ["cliente_nombre", "cliente_celular", "fecha_validez"]].copy()
     if not df_p_show.empty:
         df_p_show.columns = ["Nombre del Cliente", "Celular de Contacto", "Vence en"]
         _fv_agenda = pd.to_datetime(df_p_show["Vence en"], format='mixed', dayfirst=True, errors='coerce')
@@ -2231,10 +2595,14 @@ def render_caratula():
 
     c1, c2, c3 = st.columns([1, 1.5, 1])
     with c2:
-        vista = st.selectbox("CREDENCIALES DE ACCESO:", ["-- Seleccione su Perfil --", "VISTA GENERAL (Reporte Ejecutivo)", "VISTA APS (Gestión Operativa)"], key="vista_caratula")
+        vista = st.selectbox("CREDENCIALES DE ACCESO:", ["-- Seleccione su Perfil --", "VISTA GENERAL (Reporte Ejecutivo)", "VISTA APS (Gestión Operativa)", "VISTA KAIZEN (Gestión de Calidad)"], key="vista_caratula")
         
         if vista == "VISTA GENERAL (Reporte Ejecutivo)":
             st.session_state.perfil = "GENERAL"
+            st.session_state.seccion = "general"
+            st.rerun()
+        elif vista == "VISTA KAIZEN (Gestión de Calidad)":
+            st.session_state.perfil = "KAIZEN"
             st.session_state.seccion = "general"
             st.rerun()
         elif vista == "VISTA APS (Gestión Operativa)":
@@ -2254,4 +2622,5 @@ elif sec == "radial":         render_radial()
 elif sec == "pendientes":     render_pendientes()
 elif sec == "verbalizaciones": render_verbalizaciones()
 elif sec == "vista_aps":       render_vista_aps() 
+elif sec == "kaizen_alertas" and perfil == "KAIZEN": render_kaizen_alertas()
 else: render_caratula()
