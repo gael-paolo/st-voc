@@ -587,17 +587,7 @@ def resumen_aps(aps, fytd, mes, ciudad):
     }).sort_values(["vencido", "_orden"]).drop(columns="_orden")
     vivas = int((~vencido).sum()); vencidas = int(vencido.sum())
 
-    # Proyección para llegar a la meta ISC
-    req = (pen / (1 - obj_isc)) - enc_tot if (isc_val < obj_isc and obj_isc < 1) else 0
-    fal = max(1, int(np.ceil(req))) if req > 0 else 0
-    if enc_tot == 0:
-        msg, msg_color = "Aún no tienes encuestas ISC registradas este mes.", "#555555"
-    elif isc_val >= obj_isc:
-        msg, msg_color = f"¡Felicidades! Superaste la meta ISC del {obj_isc:.0%}. Mantén la calidad.", "#2E7D32"
-    elif fal <= vivas:
-        msg, msg_color = f"Necesitas que {fal} de tus {vivas} encuestas pendientes cierren con calificación perfecta (10) para llegar al {obj_isc:.0%}.", "#F57F17"
-    else:
-        msg, msg_color = f"Necesitas {fal} encuestas perfectas, pero solo tienes {vivas} disponibles por llamar.", "#D32F2F"
+    alertas = alertas_metas(isc_val, obj_isc, enc_tot, tre_val, obj_tre, e_tot)
 
     # Foco de mejora (Top 3), misma regla que Vista APS
     df_at = filtrar(D["atrib_aps"], fytd=fytd, ciudad=ciudad, aps=aps)
@@ -615,12 +605,27 @@ def resumen_aps(aps, fytd, mes, ciudad):
     return {"aps": aps, "fytd": fytd, "mes": mes, "e_tot": int(e_tot), "c_tot": int(c_tot),
             "tre": tre_val, "obj_tre": obj_tre, "enc_tot": int(enc_tot), "isc": isc_val, "obj_isc": obj_isc,
             "vivas": vivas, "vencidas": vencidas, "contactos": contactos,
-            "msg": msg, "msg_color": msg_color, "fort": fort, "aler": aler}
+            "alertas": alertas, "fort": fort, "aler": aler}
 
 def _color_kpi(val, obj):
     if val >= obj: return "#388E3C"
     if val >= obj - 0.03: return "#F57F17"
     return "#D32F2F"
+
+def alertas_metas(isc_val, obj_isc, enc_tot, tre_val, obj_tre, e_tot):
+    """Alertas de cumplimiento de meta (ISC y TRE). Fuente única para el correo Kaizen y Vista APS.
+    Devuelve [(mensaje, color), (mensaje, color)]."""
+    def _alerta(nombre, val, obj, hay_datos):
+        if not hay_datos:
+            return f"{nombre}: aún no tienes resultados registrados este mes.", "#555555"
+        if val >= obj:
+            return (f"¡Felicidades! Alcanzaste la meta de {nombre}: lograste {val:.1%} frente a una meta de {obj:.0%}. "
+                    f"Sigue así."), "#2E7D32"
+        return (f"No alcanzaste la meta de {nombre}: lograste {val:.1%} frente a una meta de {obj:.0%} "
+                f"({(obj - val) * 100:.1f} puntos por debajo). Enfoquémonos en mejorar este indicador."), _color_kpi(val, obj)
+    return [_alerta("ISC", isc_val, obj_isc, enc_tot > 0), _alerta("TRE", tre_val, obj_tre, e_tot > 0)]
+
+FONDO_ALERTA = {"#2E7D32": "#E8F5E9", "#F57F17": "#FFF8E1", "#D32F2F": "#FFEBEE", "#555555": "#F5F5F5"}
 
 def html_correo_aps(r):
     """Arma el correo HTML (estilos en línea, compatible con Gmail/Outlook)."""
@@ -666,7 +671,7 @@ def html_correo_aps(r):
     {kpi("TRE", f"{r['tre']:.1%}", f"Meta: {r['obj_tre']:.0%}", _color_kpi(r['tre'], r['obj_tre']))}
     {kpi("ISC", f"{r['isc']:.1%}", f"Meta: {r['obj_isc']:.0%}", _color_kpi(r['isc'], r['obj_isc']))}
   </tr></table></td></tr>
-  <tr><td style="padding:8px 10px;"><div style="background:#FFFFFF;border-left:5px solid {r['msg_color']};padding:10px 12px;font:14px Arial,sans-serif;color:{r['msg_color']};">{e(r['msg'])}</div></td></tr>
+  {"".join(f"""<tr><td style="padding:4px 10px;"><div style="background:#FFFFFF;border-left:5px solid {c};padding:10px 12px;font:14px Arial,sans-serif;color:{c};">{e(m)}</div></td></tr>""" for m, c in r['alertas'])}
   <tr><td style="padding:12px 10px 4px;font:900 16px Arial,sans-serif;color:#1A1A2E;">Contactos en uso ({r['vivas']} pendientes · {r['vencidas']} vencidos)</td></tr>
   <tr><td style="padding:0 10px;">{tabla_contactos}</td></tr>
   <tr><td style="padding:16px 10px 4px;font:900 16px Arial,sans-serif;color:#1A1A2E;">Foco de mejora (Top 3 atributos)</td></tr>
@@ -680,7 +685,7 @@ def html_correo_aps(r):
 def texto_correo_aps(r):
     lineas = [f"Resultados de {r['aps']} — {r['mes']} ({r['fytd']})", "",
               f"Encuestas enviadas: {r['e_tot']}", f"TRE: {r['tre']:.1%} (meta {r['obj_tre']:.0%})",
-              f"ISC: {r['isc']:.1%} (meta {r['obj_isc']:.0%})", "", r["msg"], "",
+              f"ISC: {r['isc']:.1%} (meta {r['obj_isc']:.0%})", ""] + [m for m, _ in r["alertas"]] + ["",
               f"Contactos en uso: {r['vivas']} pendientes, {r['vencidas']} vencidos"]
     for _, c in r["contactos"].iterrows():
         lineas.append(f"- {c['cliente']} | {c['celular']} | vence {c['vence']}{' (VENCIDO)' if c['vencido'] else ''}")
@@ -2422,7 +2427,6 @@ def render_vista_aps():
         st.pyplot(fig_r); plt.close(fig_r)
 
     with c_kpi:
-        penalties = df_isc_sel["I16"].sum()*2 + df_isc_sel["I78"].sum()
         # Pendientes vigentes del asesor (contacto en uso y aún no vencidas), misma lógica que la sección Pendientes
         _pend_aps = aplicar_filtro_ciudad(D["pendientes"], CIUDAD)
         if {"aps_nombre", "status", "fecha_validez"}.issubset(_pend_aps.columns):
@@ -2431,20 +2435,11 @@ def render_vista_aps():
             _pend_aps = pd.DataFrame(columns=["cliente_nombre", "cliente_celular", "fecha_validez"])
         _venc_aps = pd.to_datetime(_pend_aps["fecha_validez"], format='mixed', dayfirst=True, errors='coerce') < pd.Timestamp.today().normalize()
         vivas = int((~_venc_aps).sum())
-        req = (penalties / (1 - obj_isc)) - enc_tot if isc_val < obj_isc else 0
-        fal = max(1, int(np.ceil(req))) if req > 0 else 0
-        
-        if isc_val >= obj_isc:
-            msg_txt = f"¡Felicidades! Ya superaste la meta del <b>{obj_isc:.0%}</b>. Mantén la calidad."
-            color_msg, bg_msg = "#2E7D32", "#E8F5E9"
-        else:
-            if fal <= vivas:
-                msg_txt = f"<b>Proyección:</b> Necesitas que <b>{fal}</b> de tus <b>{vivas}</b> encuestas pendientes cierren con calificación perfecta (10) para llegar al <b>{obj_isc:.0%}</b>."
-                color_msg, bg_msg = "#F57F17", "#FFF8E1"
-            else:
-                msg_txt = f"<b>Alerta:</b> Necesitas <b>{fal}</b> encuestas perfectas, pero solo tienes <b>{vivas}</b> encuestas disponibles por llamar."
-                color_msg, bg_msg = "#D32F2F", "#FFEBEE"
-                
+        # Mismas alertas que el correo Kaizen (espejo)
+        import html as _h
+        cajas_alerta = "".join(
+            f"""<div style="background:{FONDO_ALERTA.get(c, '#F5F5F5')}; border: 1px solid {c}; border-radius: 10px; padding: 12px 15px; text-align: center; width: 100%; margin-bottom: 10px;"><span style="color:{c}; font-size: 15px; line-height: 1.4;">{_h.escape(m)}</span></div>"""
+            for m, c in alertas_metas(isc_val, obj_isc, enc_tot, tre_val, obj_tre, e_tot))
         st.markdown(f"""
         <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; padding-top:20px;">
             <div style="width: 190px; height: 190px; border-radius: 50%; background-color: #FFFFFF; display: flex; align-items: center; justify-content: center; box-shadow: 0 8px 16px rgba(0,0,0,0.15); border: 6px solid #FFD600; margin-bottom: 25px;">
@@ -2454,9 +2449,7 @@ def render_vista_aps():
                     <span style="color: #1A1A2E; font-size: 18px; font-weight: bold;">de {len(df_rd)}</span>
                 </div>
             </div>
-            <div style="background:{bg_msg}; border: 1px solid {color_msg}; border-radius: 10px; padding: 15px; text-align: center; width: 100%;">
-                <span style="color:{color_msg}; font-size: 15px; line-height: 1.4;">{msg_txt}</span>
-            </div>
+            {cajas_alerta}
         </div>
         """, unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
