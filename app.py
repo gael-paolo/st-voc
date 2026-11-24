@@ -115,6 +115,7 @@ def cargar_datos():
         "09_tre_mensual_aps.csv"     : "tre_aps",
         "10_atributos_aps.csv"       : "atrib_aps",
         "12_verbalizaciones.csv"     : "verbaliz",
+        "13_alertas.csv"             : "alertas",
     }
     ARCHIVOS_CIUDAD = {
         "11_atributos_especiales.csv": "especiales",
@@ -184,6 +185,8 @@ def cargar_datos():
                 df_concat = df_concat.drop_duplicates(
                     subset=["mes_anio", "ciudad", "dealer", "atributo"], keep="last"
                 )
+            elif clave == "alertas":
+                df_concat = df_concat.drop_duplicates(subset=["mes_anio", "id_contacto"], keep="last")
             elif clave == "atrib_aps":
                 df_concat = df_concat.drop_duplicates(
                     subset=["mes_anio", "ciudad", "dealer", "aps_nombre", "atributo"], keep="last"
@@ -551,6 +554,39 @@ def periodo_mes_actual(ciudad):
     meses = meses_de(D["isc_aps"], fytd, ciudad)
     return fytd, (meses[-1] if meses else None)
 
+_ORDEN_ALERTA = {"Pendiente": 0, "Vencida": 1, "Gestionada": 2}
+
+def alertas_cliente(aps=None, mes=None, ciudad="TODAS", fytd=None):
+    """Alertas de clientes insatisfechos (casos graves a atender en 24 h), pendientes primero."""
+    df = D["alertas"]
+    if df.empty: return df
+    df = aplicar_filtro_ciudad(df, ciudad)
+    if fytd and "fytd" in df.columns: df = df[df["fytd"] == fytd]
+    if mes and mes != "TODOS": df = df[df["mes_anio"] == mes]
+    if aps and aps != "TODOS": df = df[df["aps_nombre"] == aps]
+    return (df.assign(_o=df["estado"].map(_ORDEN_ALERTA).fillna(3))
+              .sort_values(["_o", "dias_para_expirar"]).drop(columns="_o").reset_index(drop=True))
+
+def _txt_estado_alerta(estado, dias):
+    if estado == "Pendiente":
+        if pd.notna(dias): return f"Pendiente · vence en {int(dias)} día{'s' if int(dias) != 1 else ''}"
+        return "Pendiente"
+    return str(estado)
+
+def _col_txt(df, col):
+    """Columna como texto para mostrar; '—' si no existe (datos de meses anteriores) o está vacía."""
+    if col not in df.columns: return ["—"] * len(df)
+    return df[col].astype(str).str.strip().replace({"nan": "—", "None": "—", "NaN": "—", "": "—", "-": "—"}).values
+
+def _dedup_contactos(df):
+    """Un contacto = un ID (reporte nuevo). Filas de meses antiguos (sin ID): nombre + celular."""
+    if "id_contacto" not in df.columns:
+        return df.drop_duplicates(subset=[c for c in ["cliente_nombre", "cliente_celular"] if c in df.columns])
+    con_id = df[df["id_contacto"].notna()].drop_duplicates(subset=["mes_anio", "id_contacto"], keep="last")
+    sin_id = df[df["id_contacto"].isna()]
+    sin_id = sin_id.drop_duplicates(subset=[c for c in ["mes_anio", "cliente_nombre", "cliente_celular"] if c in sin_id.columns])
+    return pd.concat([sin_id, con_id], ignore_index=True)
+
 def resumen_aps(aps, fytd, mes, ciudad):
     """Calcula los datos del correo de un APS con la misma lógica que Vista APS."""
     meses_proc = [mes]
@@ -573,14 +609,15 @@ def resumen_aps(aps, fytd, mes, ciudad):
     df_p = aplicar_filtro_ciudad(D["pendientes"], ciudad)
     if {"aps_nombre", "status", "fecha_validez"}.issubset(df_p.columns):
         df_p = df_p[(df_p["aps_nombre"] == aps) & (df_p["status"] == "Contacto en uso")]
-        df_p = df_p.drop_duplicates(subset=[c for c in ["cliente_nombre", "cliente_celular"] if c in df_p.columns])
+        df_p = _dedup_contactos(df_p)
     else:
-        df_p = pd.DataFrame(columns=["cliente_nombre", "cliente_celular", "fecha_validez"])
+        df_p = pd.DataFrame(columns=["cliente_nombre", "vehiculo", "vin", "fecha_validez"])
     fv = pd.to_datetime(df_p["fecha_validez"], format='mixed', dayfirst=True, errors='coerce')
     vencido = fv < pd.Timestamp.today().normalize()
     contactos = pd.DataFrame({
         "cliente": df_p["cliente_nombre"].astype(str).values if "cliente_nombre" in df_p.columns else [],
-        "celular": df_p["cliente_celular"].astype(str).str.replace(".0", "", regex=False).replace({"nan": "—"}).values if "cliente_celular" in df_p.columns else [],
+        "vehiculo": _col_txt(df_p, "vehiculo"),
+        "vin":      _col_txt(df_p, "vin"),
         "vence":   (fv - pd.Timedelta(days=1)).dt.strftime('%d/%m/%Y').fillna("—").values,
         "vencido": vencido.values,
         "_orden":  fv.values,
@@ -602,7 +639,11 @@ def resumen_aps(aps, fytd, mes, ciudad):
     fort = sorted(fort, key=lambda x: x["val"], reverse=True)[:3]
     aler = sorted(aler, key=lambda x: x["val"])[:3]
 
+    al_cli = alertas_cliente(aps, mes, ciudad, fytd)
     return {"aps": aps, "fytd": fytd, "mes": mes, "e_tot": int(e_tot), "c_tot": int(c_tot),
+            "alertas_cli": al_cli,
+            "alertas_pend": int((al_cli["estado"] == "Pendiente").sum()) if not al_cli.empty else 0,
+            "alertas_venc": int((al_cli["estado"] == "Vencida").sum()) if not al_cli.empty else 0,
             "tre": tre_val, "obj_tre": obj_tre, "enc_tot": int(enc_tot), "isc": isc_val, "obj_isc": obj_isc,
             "vivas": vivas, "vencidas": vencidas, "contactos": contactos,
             "alertas": alertas, "fort": fort, "aler": aler}
@@ -640,7 +681,8 @@ def html_correo_aps(r):
         est = ("<span style='color:#D32F2F;font-weight:bold;'>Vencido</span>" if c["vencido"]
                else "<span style='color:#F57F17;font-weight:bold;'>Pendiente</span>")
         filas += (f"<tr><td style='padding:6px 8px;border-bottom:1px solid #EEE;font:13px Arial,sans-serif;'>{e(c['cliente'])}</td>"
-                  f"<td style='padding:6px 8px;border-bottom:1px solid #EEE;font:13px Arial,sans-serif;'>{e(c['celular'])}</td>"
+                  f"<td style='padding:6px 8px;border-bottom:1px solid #EEE;font:13px Arial,sans-serif;'>{e(c['vehiculo'])}</td>"
+                  f"<td style='padding:6px 8px;border-bottom:1px solid #EEE;font:12px Arial,sans-serif;'>{e(c['vin'])}</td>"
                   f"<td align='center' style='padding:6px 8px;border-bottom:1px solid #EEE;font:13px Arial,sans-serif;'>{e(c['vence'])}</td>"
                   f"<td align='center' style='padding:6px 8px;border-bottom:1px solid #EEE;font:13px Arial,sans-serif;'>{est}</td></tr>")
     if not filas:
@@ -648,9 +690,41 @@ def html_correo_aps(r):
     else:
         tabla_contactos = f"""<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#FFFFFF;">
           <tr style="background:#1A1A2E;"><th align="left" style="padding:8px;font:700 12px Arial,sans-serif;color:#FFF;">Cliente</th>
-          <th align="left" style="padding:8px;font:700 12px Arial,sans-serif;color:#FFF;">Celular</th>
+          <th align="left" style="padding:8px;font:700 12px Arial,sans-serif;color:#FFF;">Vehículo</th>
+          <th align="left" style="padding:8px;font:700 12px Arial,sans-serif;color:#FFF;">VIN</th>
           <th style="padding:8px;font:700 12px Arial,sans-serif;color:#FFF;">Vence</th>
           <th style="padding:8px;font:700 12px Arial,sans-serif;color:#FFF;">Estado</th></tr>{filas}</table>"""
+
+    # Alertas de clientes insatisfechos: solo aparece si el asesor tiene casos en el periodo
+    al = r["alertas_cli"]
+    if al.empty:
+        bloque_alertas_cli = ""
+    else:
+        filas_al = ""
+        for _, a_ in al.iterrows():
+            pend_ = a_["estado"] == "Pendiente"
+            col_ = "#C62828" if pend_ else ("#757575" if a_["estado"] == "Vencida" else "#2E7D32")
+            motivo = "" if pd.isna(a_.get("verbalizacion")) else str(a_["verbalizacion"])
+            motivo = motivo if len(motivo) <= 180 else motivo[:177] + "..."
+            calif = "" if pd.isna(a_.get("satisfaccion")) else f"{int(a_['satisfaccion'])}"
+            fondo_ = "#FFF3F3" if pend_ else "#FFFFFF"
+            td = f"padding:6px 8px;border-bottom:1px solid #EEE;font:13px Arial,sans-serif;background:{fondo_};"
+            filas_al += (f"<tr><td style='{td}'><b>{e(str(a_['cliente_nombre']))}</b></td>"
+                         f"<td style='{td}'>{e(str(a_['vehiculo']))}<br><span style='font-size:11px;color:#777;'>{e(str(a_['vin']))}</span></td>"
+                         f"<td align='center' style='{td}'>{e(calif)}</td>"
+                         f"<td style='{td}'>{e(motivo)}</td>"
+                         f"<td align='center' style='{td}color:{col_};font-weight:bold;'>{e(_txt_estado_alerta(a_['estado'], a_.get('dias_para_expirar')))}</td></tr>")
+        aviso_al = ("Casos graves: el cliente debe ser contactado dentro de las primeras 24 horas. Búscalo en el sistema por nombre o VIN."
+                    if r["alertas_pend"] else "Estas alertas ya superaron el plazo de atención; se informan para tu seguimiento.")
+        bloque_alertas_cli = f"""
+  <tr><td style="padding:14px 10px 2px;font:900 16px Arial,sans-serif;color:#C62828;">ALERTAS DE CLIENTES INSATISFECHOS ({r['alertas_pend']} por atender · {r['alertas_venc']} vencidas)</td></tr>
+  <tr><td style="padding:0 10px 6px;font:13px Arial,sans-serif;color:#555;">{aviso_al}</td></tr>
+  <tr><td style="padding:0 10px;"><table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;background:#FFFFFF;border:1px solid #F5C6C6;">
+    <tr style="background:#C62828;"><th align="left" style="padding:8px;font:700 12px Arial,sans-serif;color:#FFF;">Cliente</th>
+    <th align="left" style="padding:8px;font:700 12px Arial,sans-serif;color:#FFF;">Vehículo / VIN</th>
+    <th style="padding:8px;font:700 12px Arial,sans-serif;color:#FFF;">Calif.</th>
+    <th align="left" style="padding:8px;font:700 12px Arial,sans-serif;color:#FFF;">Motivo</th>
+    <th style="padding:8px;font:700 12px Arial,sans-serif;color:#FFF;">Estado</th></tr>{filas_al}</table></td></tr>"""
 
     def bloque_focos(lista, titulo, color, fondo, borde):
         if not lista:
@@ -672,6 +746,7 @@ def html_correo_aps(r):
     {kpi("ISC", f"{r['isc']:.1%}", f"Meta: {r['obj_isc']:.0%}", _color_kpi(r['isc'], r['obj_isc']))}
   </tr></table></td></tr>
   {"".join(f"""<tr><td style="padding:4px 10px;"><div style="background:#FFFFFF;border-left:5px solid {c};padding:10px 12px;font:14px Arial,sans-serif;color:{c};">{e(m)}</div></td></tr>""" for m, c in r['alertas'])}
+  {bloque_alertas_cli}
   <tr><td style="padding:12px 10px 4px;font:900 16px Arial,sans-serif;color:#1A1A2E;">Contactos en uso ({r['vivas']} pendientes · {r['vencidas']} vencidos)</td></tr>
   <tr><td style="padding:0 10px;">{tabla_contactos}</td></tr>
   <tr><td style="padding:16px 10px 4px;font:900 16px Arial,sans-serif;color:#1A1A2E;">Foco de mejora (Top 3 atributos)</td></tr>
@@ -687,11 +762,21 @@ def texto_correo_aps(r):
               f"Encuestas enviadas: {r['e_tot']}", f"TRE: {r['tre']:.1%} (meta {r['obj_tre']:.0%})",
               f"ISC: {r['isc']:.1%} (meta {r['obj_isc']:.0%})", ""] + [m for m, _ in r["alertas"]] + ["",
               f"Contactos en uso: {r['vivas']} pendientes, {r['vencidas']} vencidos"]
+    if not r["alertas_cli"].empty:
+        lineas += ["", f"ALERTAS DE CLIENTES INSATISFECHOS ({r['alertas_pend']} por atender, {r['alertas_venc']} vencidas)" + (" — contactar en las primeras 24 h:" if r["alertas_pend"] else " — plazo de atención superado:")]
+        for _, a_ in r["alertas_cli"].iterrows():
+            lineas.append(f"- {a_['cliente_nombre']} | {a_['vehiculo']} | {a_['vin']} | calif. {a_['satisfaccion']:.0f} | {_txt_estado_alerta(a_['estado'], a_.get('dias_para_expirar'))}")
+        lineas.append("")
     for _, c in r["contactos"].iterrows():
-        lineas.append(f"- {c['cliente']} | {c['celular']} | vence {c['vence']}{' (VENCIDO)' if c['vencido'] else ''}")
+        lineas.append(f"- {c['cliente']} | {c['vehiculo']} | {c['vin']} | vence {c['vence']}{' (VENCIDO)' if c['vencido'] else ''}")
     lineas += ["", "Fortalezas:"] + [f"- {x['attr']}: {x['val']:.1%} (meta {x['meta']:.0%})" for x in r["fort"]]
     lineas += ["", "Por mejorar:"] + [f"- {x['attr']}: {x['val']:.1%} (meta {x['meta']:.0%})" for x in r["aler"]]
     return "\n".join(lineas)
+
+def asunto_correo(tpl, mes, aps, r):
+    """Asunto del correo; se marca como ALERTA cuando el asesor tiene casos por atender."""
+    a = tpl.format(mes=mes, aps=aps)
+    return f"[ALERTA] {a} · {r['alertas_pend']} cliente(s) por contactar" if r["alertas_pend"] else a
 
 def config_gmail():
     try:
@@ -745,7 +830,10 @@ def render_kaizen_alertas():
     con_correo = df_dir[df_dir["Correo"] != ""]["APS"].tolist()
     sin_correo = df_dir[df_dir["Correo"] == ""]["APS"].tolist()
 
-    k1, k2, k3 = st.columns(3)
+    k1, k2, k3, k4 = st.columns(4)
+    _al_mes = alertas_cliente(None, mes, CIUDAD, fytd)
+    _n_pend = int((_al_mes["estado"] == "Pendiente").sum()) if not _al_mes.empty else 0
+    with k4: st.markdown(kpi_html("Alertas por atender", _n_pend, "{:.0f}", "Se incluyen en los correos", color="#D32F2F" if _n_pend else "#1A1A2E"), unsafe_allow_html=True)
     with k1: st.markdown(kpi_html("Periodo del correo", mes, "{}", f"Último mes · {fytd}"), unsafe_allow_html=True)
     with k2: st.markdown(kpi_html("APS con correo", len(con_correo), "{:.0f}", f"de {len(aps_lista)} asesores", color="#388E3C"), unsafe_allow_html=True)
     with k3: st.markdown(kpi_html("APS sin correo", len(sin_correo), "{:.0f}", "Agrégalos al directorio", color="#D32F2F" if sin_correo else "#1A1A2E"), unsafe_allow_html=True)
@@ -773,7 +861,7 @@ def render_kaizen_alertas():
     with c_p:
         if st.button(f"Enviar prueba a {cfg['user']}", key="kz_test", width="stretch"):
             try:
-                res = enviar_correos([(cfg["user"], None, "[PRUEBA] " + asunto_tpl.format(mes=mes, aps=aps_prev),
+                res = enviar_correos([(cfg["user"], None, "[PRUEBA] " + asunto_correo(asunto_tpl, mes, aps_prev, r_prev),
                                        html_correo_aps(r_prev), texto_correo_aps(r_prev))], cfg)
                 st.success("Prueba enviada.") if res[0][1] else st.error(f"Error: {res[0][2]}")
             except Exception as ex:
@@ -791,7 +879,7 @@ def render_kaizen_alertas():
         lote = []
         for a in seleccion:
             r = resumen_aps(a, fytd, mes, CIUDAD)
-            lote.append((directorio[_norm_nombre(a)], cfg["cc"], asunto_tpl.format(mes=mes, aps=a),
+            lote.append((directorio[_norm_nombre(a)], cfg["cc"], asunto_correo(asunto_tpl, mes, a, r),
                          html_correo_aps(r), texto_correo_aps(r)))
         with st.spinner(f"Enviando {len(lote)} correos..."):
             try:
@@ -862,6 +950,7 @@ if sec != "caratula":
             if st.button("TENDENCIA ISC",   key="nav_ten"):  st.session_state.seccion="tendencia"
             st.markdown("<hr>", unsafe_allow_html=True)
             st.markdown("<div style='padding:8px 16px;font-size:11px;color:#666;letter-spacing:1px;font-weight:700'>OPERATIVO</div>", unsafe_allow_html=True)
+            if st.button("ALERTAS 24 H",  key="nav_alr"):  st.session_state.seccion="alertas"
             if st.button("PENDIENTES",    key="nav_pen"):  st.session_state.seccion="pendientes"
             st.markdown("<hr>", unsafe_allow_html=True)
             st.markdown("<div style='padding:8px 16px;font-size:11px;color:#666;letter-spacing:1px;font-weight:700'>MI PERFIL</div>", unsafe_allow_html=True)
@@ -1120,6 +1209,16 @@ def render_general():
                 v_mean = row_e[attr_name].mean()
                 val_actual = float(v_mean) if pd.notna(v_mean) else 0.0
 
+        # "Alertas atendidas en 24 Hrs": se calcula del reporte de alertas; si no hay, queda el valor manual
+        nota_auto = ""
+        if attr_name == "Alertas atendidas en 24 Hrs" and not D["alertas"].empty:
+            _al_e = aplicar_filtro_ciudad(D["alertas"], CIUDAD)
+            _al_e = _al_e[(_al_e["fytd"].astype(str).str.upper() == fytd_str) & (_al_e["mes_anio"].isin(meses_a_procesar))]
+            _al_e = _al_e[_al_e["en_tiempo_24h"].isin(["Sí", "No"])]
+            if not _al_e.empty:
+                val_actual = float((_al_e["en_tiempo_24h"] == "Sí").mean())
+                nota_auto = f"Calculado del reporte de alertas: {int((_al_e['en_tiempo_24h'] == 'Sí').sum())} de {len(_al_e)} atendidas en 24 h"
+
         obj_val = 0.85
         if not obj_obj.empty:
             for col in obj_obj.columns:
@@ -1149,6 +1248,7 @@ def render_general():
         </div>
         """
         cols_redondos[i].markdown(html_r, unsafe_allow_html=True)
+        if nota_auto: cols_redondos[i].caption(nota_auto)
 
 # ==============================================================================
 # SECCIÓN 2: TENDENCIA ISC 
@@ -2012,15 +2112,99 @@ def render_radial():
 def cached_jpg_export(df, table_type):
     if table_type == 'pendientes':
         styler = df.style.apply(lambda row: ["color:#D32F2F;font-weight:bold" if c == "Estado" and row["Estado"] == "Expirado" else ("color:#FF8C00;font-weight:bold" if c == "Estado" and row["Estado"] == "Contacto en uso" else "") for c in row.index], axis=1).set_table_attributes('class="tabla-voc"').hide(axis="index")
+    elif table_type == 'alertas':
+        styler = df.style.apply(lambda row: ["color:#D32F2F;font-weight:bold" if c == "Estado" and str(row["Estado"]).startswith("Pendiente") else ("color:#757575;font-weight:bold" if c == "Estado" else "") for c in row.index], axis=1).set_table_attributes('class="tabla-voc"').hide(axis="index")
     elif table_type == 'resumen':
         styler = df.style.apply(lambda row: ["background-color:#ffcccc;color:black;font-weight:bold" if c == "Vencidas" and row["Vencidas"] > 0 else ("background-color:#E8E8E8;font-weight:bold" if row["Asesor"] == "TOTAL GENERAL" else "") for c in row.index], axis=1).format({"Total Enviadas":"{:.0f}", "Completadas":"{:.0f}", "Vencidas":"{:.0f}", "Pendientes":"{:.0f}"}).set_table_attributes('class="tabla-voc"').hide(axis="index")
     return styler_to_jpg_buf(styler).getvalue()
+
+def tabla_alertas_detalle(df):
+    """Tabla legible de alertas (para la sección Alertas y Vista APS)."""
+    t = pd.DataFrame({
+        "Asesor": df["aps_nombre"].values,
+        "Cliente": df["cliente_nombre"].values,
+        "Vehículo": df["vehiculo"].values,
+        "VIN": df["vin"].values,
+        "Calif.": df["satisfaccion"].map(lambda v: "—" if pd.isna(v) else f"{int(v)}").values,
+        "Motivo": df["verbalizacion"].fillna("—").astype(str).values,
+        "Estado": [_txt_estado_alerta(e_, d_) for e_, d_ in zip(df["estado"], df["dias_para_expirar"])],
+        "¿Atendida en 24 h?": df["en_tiempo_24h"].replace({"": "—"}).fillna("—").values,
+    })
+    return t
+
+def _estilo_alertas(t):
+    return t.style.apply(lambda row: ["color:#D32F2F;font-weight:bold" if c == "Estado" and str(row["Estado"]).startswith("Pendiente")
+                                      else ("color:#757575;font-weight:bold" if c == "Estado" and row["Estado"] == "Vencida"
+                                            else ("color:#388E3C;font-weight:bold" if c == "Estado" else "")) for c in row.index],
+                         axis=1).set_table_attributes('class="tabla-voc"').hide(axis="index")
+
+def render_alertas():
+    st.markdown("<div class='seccion-titulo'>Alertas de Clientes — atención en 24 h</div>", unsafe_allow_html=True)
+    if D["alertas"].empty:
+        st.info("Sin datos de alertas. Carga el reporte AcompanamientoDeAlertas en el preprocesador."); return
+    df_a = aplicar_filtro_ciudad(D["alertas"], CIUDAD)
+    if df_a.empty:
+        st.info("No hay alertas para la ciudad seleccionada."); return
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: fytd_a = st.selectbox("Periodo:", sorted(df_a["fytd"].unique(), reverse=True), key="al_fytd")
+    with c2: mes_a = st.selectbox("Mes:", ["TODOS"] + sorted(df_a[df_a["fytd"] == fytd_a]["mes_anio"].unique()), key="al_mes")
+    with c3: dealer_a = st.selectbox("Dealer:", ["LISTADO GENERAL"] + sorted(df_a["dealer"].unique()), key="al_dlr")
+    df_f = df_a[df_a["fytd"] == fytd_a].copy()
+    if mes_a != "TODOS": df_f = df_f[df_f["mes_anio"] == mes_a]
+    if dealer_a != "LISTADO GENERAL": df_f = df_f[df_f["dealer"] == dealer_a]
+    with c4:
+        aps_a = st.selectbox("Asesor (APS):", ["TODOS"] + sorted([str(x) for x in df_f["aps_nombre"].unique()]), key="al_aps")
+    if aps_a != "TODOS": df_f = df_f[df_f["aps_nombre"] == aps_a]
+
+    tot = len(df_f)
+    n_pen = int((df_f["estado"] == "Pendiente").sum())
+    n_ven = int((df_f["estado"] == "Vencida").sum())
+    n_ges = int((df_f["estado"] == "Gestionada").sum())
+    n_24 = int((df_f["en_tiempo_24h"] == "Sí").sum())
+
+    k1, k2, k3, k4 = st.columns(4)
+    with k1: st.markdown(kpi_html("Total alertas", tot, "{:.0f}", "Clientes insatisfechos"), unsafe_allow_html=True)
+    with k2: st.markdown(kpi_html("Por atender", n_pen, "{:.0f}", "Acción hoy", color="#D32F2F" if n_pen else "#388E3C"), unsafe_allow_html=True)
+    with k3: st.markdown(kpi_html("Vencidas", n_ven, "{:.0f}", "Plazo cumplido sin gestión", color="#757575"), unsafe_allow_html=True)
+    with k4: st.markdown(kpi_html("Atendidas en 24 h", n_24 / tot if tot else 0, "{:.0%}", f"{n_24} de {tot}", color="#388E3C" if tot and n_24 == tot else "#F57F17"), unsafe_allow_html=True)
+
+    st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+    filtro = st.radio("Mostrar:", ["Todas", "Pendiente", "Vencida", "Gestionada"], horizontal=True, key="al_estado")
+    df_m = df_f if filtro == "Todas" else df_f[df_f["estado"] == filtro]
+    df_m = df_m.assign(_o=df_m["estado"].map(_ORDEN_ALERTA).fillna(3)).sort_values(["_o", "dias_para_expirar", "aps_nombre"]).drop(columns="_o")
+
+    st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
+    st.markdown(f"**DETALLE DE ALERTAS — {dealer_a} · {CIUDAD}**")
+    st.caption("Busca al cliente en el sistema por nombre o VIN para contactarlo.")
+    if df_m.empty:
+        st.success("Sin alertas para este filtro.")
+    else:
+        t = tabla_alertas_detalle(df_m)
+        st.markdown(tabla_html(_estilo_alertas(t)), unsafe_allow_html=True)
+        boton_descarga_tabla(st, "Descargar Alertas", t, lambda: cached_jpg_export(t, 'alertas'), "Alertas", "dl_alertas")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
+    st.markdown("**Resumen por Asesor**")
+    res = (df_f.assign(Pendientes=(df_f["estado"] == "Pendiente").astype(int), Vencidas=(df_f["estado"] == "Vencida").astype(int),
+                       Gestionadas=(df_f["estado"] == "Gestionada").astype(int), En24=(df_f["en_tiempo_24h"] == "Sí").astype(int))
+           .groupby("aps_nombre").agg(Alertas=("id_contacto", "count"), Pendientes=("Pendientes", "sum"), Vencidas=("Vencidas", "sum"),
+                                      Gestionadas=("Gestionadas", "sum"), En24=("En24", "sum")).reset_index()
+           .rename(columns={"aps_nombre": "Asesor", "En24": "Atendidas en 24 h"}).sort_values("Alertas", ascending=False))
+    tot_r = pd.DataFrame([{"Asesor": "TOTAL GENERAL", **{c: int(res[c].sum()) for c in res.columns if c != "Asesor"}}])
+    res = pd.concat([res, tot_r], ignore_index=True)
+    st_r = res.style.apply(lambda row: ["background-color:#ffcccc;font-weight:bold" if c == "Pendientes" and row["Pendientes"] > 0
+                                        else ("background-color:#E8E8E8;font-weight:bold" if row["Asesor"] == "TOTAL GENERAL" else "") for c in row.index],
+                           axis=1).set_table_attributes('class="tabla-voc"').hide(axis="index")
+    st.markdown(tabla_html(st_r), unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 @st.cache_data(show_spinner=False)
 def procesar_fechas_pendientes(df_raw, ciudad):
     if df_raw.empty: return df_raw
     df_p = aplicar_filtro_ciudad(df_raw.copy(), ciudad)
-    df_p = df_p.drop_duplicates(subset=["mes_anio", "dealer", "aps_nombre", "cliente_nombre", "cliente_celular"], keep="last")
+    df_p = _dedup_contactos(df_p)
     df_p['fecha_validez_dt'] = pd.to_datetime(df_p['fecha_validez'], format='mixed', dayfirst=True, errors='coerce')
     return df_p
 
@@ -2099,12 +2283,12 @@ def render_pendientes():
     titulo_estado = "VENCIDAS" if st.session_state.filtro_estado_p == "Expirado" else "PENDIENTES"
     st.markdown(f"**DETALLE DE {titulo_estado} — {dealer_p} · {CIUDAD}**")
     
-    ds_p = df_mostrar[["aps_nombre","cliente_nombre","cliente_celular","cliente_mail","fecha_validez", "status_calc"]].copy()
-    ds_p.columns = ["Asesor","Nombre del Cliente","Celular","Mail","Fecha Validez", "Estado"]
+    # El reporte del proveedor ya no trae celular/mail: se muestran vehículo y VIN para ubicar al cliente en el sistema
+    ds_p = df_mostrar.reindex(columns=["aps_nombre","cliente_nombre","vehiculo","vin","fecha_envio","fecha_validez","status_calc"]).copy()
+    ds_p.columns = ["Asesor","Nombre del Cliente","Vehículo","VIN","Fecha Envío","Fecha Validez", "Estado"]
     ds_p = ds_p.sort_values("Asesor").reset_index(drop=True)
-    ds_p["Celular"] = ds_p["Celular"].astype(str).str.replace(".0","",regex=False)
     # Vacíos ("nan", "None", "") se muestran como guion
-    for _col in ("Celular", "Mail"):
+    for _col in ("Vehículo", "VIN", "Fecha Envío"):
         ds_p[_col] = ds_p[_col].astype(str).str.strip().replace({"nan": "—", "None": "—", "NaN": "—", "": "—"})
     _fv_dt = pd.to_datetime(ds_p["Fecha Validez"], format='mixed', dayfirst=True, errors='coerce')
     _mask_uso = ds_p["Estado"].isin(["Contacto en uso", "Expirado"])
@@ -2432,7 +2616,7 @@ def render_vista_aps():
         if {"aps_nombre", "status", "fecha_validez"}.issubset(_pend_aps.columns):
             _pend_aps = _pend_aps[(_pend_aps["aps_nombre"] == aps_sel) & (_pend_aps["status"] == "Contacto en uso")]
         else:
-            _pend_aps = pd.DataFrame(columns=["cliente_nombre", "cliente_celular", "fecha_validez"])
+            _pend_aps = pd.DataFrame(columns=["cliente_nombre", "vehiculo", "vin", "fecha_validez"])
         _venc_aps = pd.to_datetime(_pend_aps["fecha_validez"], format='mixed', dayfirst=True, errors='coerce') < pd.Timestamp.today().normalize()
         vivas = int((~_venc_aps).sum())
         # Mismas alertas que el correo Kaizen (espejo)
@@ -2457,6 +2641,17 @@ def render_vista_aps():
     # =========================================================================
     # 2. GESTIÓN Y AGENDA
     # =========================================================================
+    # Alertas de clientes insatisfechos del asesor (solo si tiene casos en el periodo elegido)
+    _al_aps = alertas_cliente(aps_sel, None, CIUDAD, fytd_sel)
+    if not _al_aps.empty: _al_aps = _al_aps[_al_aps["mes_anio"].isin(meses_proc)]
+    if not _al_aps.empty:
+        _n_p = int((_al_aps["estado"] == "Pendiente").sum()); _n_v = int((_al_aps["estado"] == "Vencida").sum())
+        st.markdown(f"<h5 style='color:#C62828; margin-top:25px; font-weight:bold;'>Alertas de clientes insatisfechos — contactar en 24 h ({_n_p} por atender · {_n_v} vencidas)</h5>", unsafe_allow_html=True)
+        st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
+        _t_al = tabla_alertas_detalle(_al_aps).drop(columns=["Asesor"])
+        st.markdown(tabla_html(_estilo_alertas(_t_al)), unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
     st.markdown("<h5 style='color:#1A1A2E; margin-top:25px; font-weight:bold;'>Gestión de Encuestas y Agenda</h5>", unsafe_allow_html=True)
     exp = int(_venc_aps.sum())  # contacto en uso con fecha de validez ya pasada
     i1, i2, i3 = st.columns(3)
@@ -2466,9 +2661,10 @@ def render_vista_aps():
 
     st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
     st.markdown("<h4 style='color:#1A1A2E; font-weight:bold;'>Agenda Activa: Clientes a contactar ahora</h4>", unsafe_allow_html=True)
-    df_p_show = _pend_aps.loc[~_venc_aps, ["cliente_nombre", "cliente_celular", "fecha_validez"]].copy()
+    df_p_show = _pend_aps.loc[~_venc_aps].reindex(columns=["cliente_nombre", "vehiculo", "vin", "fecha_validez"]).copy()
     if not df_p_show.empty:
-        df_p_show.columns = ["Nombre del Cliente", "Celular de Contacto", "Vence en"]
+        df_p_show["vehiculo"] = _col_txt(df_p_show, "vehiculo"); df_p_show["vin"] = _col_txt(df_p_show, "vin")
+        df_p_show.columns = ["Nombre del Cliente", "Vehículo", "VIN", "Vence en"]
         _fv_agenda = pd.to_datetime(df_p_show["Vence en"], format='mixed', dayfirst=True, errors='coerce')
         df_p_show["Vence en"] = (_fv_agenda - pd.Timedelta(days=1)).dt.strftime('%d/%m/%Y')
         st.markdown(tabla_html(df_p_show.style.hide(axis="index").set_table_attributes('class="tabla-voc"')), unsafe_allow_html=True)
@@ -2612,6 +2808,7 @@ elif sec == "general":        render_general()
 elif sec == "tendencia":      render_tendencia()
 elif sec == "atributos":      render_atributos()
 elif sec == "radial":         render_radial()
+elif sec == "alertas":        render_alertas()
 elif sec == "pendientes":     render_pendientes()
 elif sec == "verbalizaciones": render_verbalizaciones()
 elif sec == "vista_aps":       render_vista_aps() 

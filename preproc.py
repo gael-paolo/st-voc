@@ -102,37 +102,91 @@ RUTA_TRE_APS     = CARPETA_SALIDA / "09_tre_mensual_aps.csv"
 RUTA_ATRIB_APS   = CARPETA_SALIDA / "10_atributos_aps.csv"
 RUTA_ESPECIALES  = CARPETA_SALIDA / "11_atributos_especiales.csv"
 RUTA_VERBALIZACIONES = CARPETA_SALIDA / "12_verbalizaciones.csv"
+RUTA_ALERTAS     = CARPETA_SALIDA / "13_alertas.csv"
 
+# Atributos identificados por CODIGO de pregunta (encabezado del RawData), no por posicion.
+# Atributos identificados por CODIGO de pregunta (encabezado del RawData), no por posicion.
 ATTR_ESCALA = {
-    31:'Recepcion del vehiculo', 33:'Facilidad para realizar la cita',
-    34:'Rapidez en recepcion', 35:'Disposicion del asesor',
-    36:'Explicacion del trabajo a realizar', 39:'Instalaciones',
-    40:'Entrega del vehiculo', 41:'Tiempo de espera en entrega',
-    42:'Limpieza del vehiculo', 43:'Explicacion del trabajo realizado',
-    44:'Explicacion costo total', 45:'Calidad de los trabajos',
-    46:'Valor pagado por el servicio', 47:'Puntualidad en la fecha de entrega',
-    48:'Puntualidad en la hora de entrega',
-    50:'Tiempo que permanecio el vehiculo en la agencia',
-    52:'Atencion del personal en la visita', 53:'Amabilidad del personal',
-    55:'Seguimiento del concesionario - asesor',
+    'P02'  :'Recepcion del vehiculo', 'P04':'Facilidad para realizar la cita',
+    'P05.1':'Rapidez en recepcion', 'P05.2':'Disposicion del asesor',
+    'P05.3':'Explicacion del trabajo a realizar', 'P08':'Instalaciones',
+    'P09'  :'Entrega del vehiculo', 'P10.1':'Tiempo de espera en entrega',
+    'P10.2':'Limpieza del vehiculo', 'P10.3':'Explicacion del trabajo realizado',
+    'P10.4':'Explicacion costo total', 'P10.5':'Calidad de los trabajos',
+    'P10.6':'Valor pagado por el servicio', 'P10.7':'Puntualidad en la fecha de entrega',
+    'P10.8':'Puntualidad en la hora de entrega',
+    'P12'  :'Tiempo que permanecio el vehiculo en la agencia',
+    'P14'  :'Atencion del personal en la visita', 'P15':'Amabilidad del personal',
+    'P17'  :'Seguimiento del concesionario - asesor',
 }
 ATTR_BINARIO = {
-    27:'Bien a la primera H1',
-    37:'Mencion del tiempo aproximado de entrega',
-    38:'Explicacion del precio antes de ingresar',
-    49:'Evidencias de trabajos realizados / repuestos',
+    'VOC06':'Bien a la primera H1',
+    'P06'  :'Mencion del tiempo aproximado de entrega',
+    'P07'  :'Explicacion del precio antes de ingresar',
+    'P11'  :'Evidencias de trabajos realizados / repuestos',
 }
 TODOS_ATTR = {**ATTR_ESCALA, **ATTR_BINARIO}
+
+# Vigencia del link de encuesta: el reporte nuevo ya no trae "Validez".
+# SUPUESTO (confirmar con el proveedor): el link sirve hasta N dias despues del envio.
+DIAS_VIGENCIA_LINK = 4
+
+ESTADO_REALIZADA = 'encuesta realizada'
+ESTADO_EXPIRADA  = 'encuesta expirada'
+ESTADOS_PENDIENTES = {'registro disponible para la encuesta', 'encuesta interrumpida'}
 
 MESES_NUM = {'Ene':1,'Feb':2,'Mar':3,'Abr':4,'May':5,'Jun':6,
              'Jul':7,'Ago':8,'Sep':9,'Oct':10,'Nov':11,'Dic':12}
 
+MESES_ABR = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic']
+MESES_ES  = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto',
+             'septiembre','octubre','noviembre','diciembre']
+
+MESES_ABR = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic']
+MESES_ES  = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto',
+             'septiembre','octubre','noviembre','diciembre']
+
 def extraer_mes_anio(nombre):
+    """Compatibilidad: formato antiguo export_YYYY_Mes_... (ya no se usa con los reportes nuevos)."""
     m = re.search(r"export_(\d{4})_([A-Za-z]+)_", nombre)
     if m:
         anio, mes = m.groups()
         mes = mes.capitalize()
         if mes in MESES_NUM: return mes, anio
+    return None, None
+
+def _norm(x):
+    """Texto en minusculas, sin acentos/nbsp, espacios colapsados ('' si es nulo)."""
+    if x is None or (isinstance(x, float) and np.isnan(x)): return ""
+    t = unicodedata.normalize('NFKD', str(x).replace('\xa0', ' ')).encode('ASCII', 'ignore').decode()
+    return re.sub(r'\s+', ' ', t).strip().lower()
+
+def _id_txt(x):
+    """ID de contacto como texto estable ('910220', no '910220.0')."""
+    t = str(x).strip()
+    return t[:-2] if t.endswith('.0') else t
+
+def norm_aps(x):
+    """Nombre de asesor comparable con INFO_BASE: sin acentos/enie, mayusculas."""
+    t = _norm(x).upper()
+    return t if t not in ("", "NAN", "-") else "SIN ASESOR"
+
+def _leer_hoja(arch):
+    """Lee la primera hoja de un reporte nuevo (.xlsx) sin encabezado."""
+    if hasattr(arch, "seek"): arch.seek(0)
+    return pd.read_excel(arch, header=None, engine="openpyxl")
+
+def _buscar_col(headers, patron, desc):
+    """Indice de la primera columna cuyo encabezado normalizado cumple el regex."""
+    for i, h in enumerate(headers):
+        if re.search(patron, h): return i
+    raise ValueError(f"No se encontro la columna '{desc}' en el reporte (patron: {patron})")
+
+def _periodo_desde_titulo(texto):
+    """'... - NOVIEMBRE/2026 - ...' -> ('Nov', '2026')."""
+    m = re.search(r'([a-z]+)\s*/\s*(\d{4})', _norm(texto))
+    if m and m.group(1) in MESES_ES:
+        return MESES_ABR[MESES_ES.index(m.group(1))], m.group(2)
     return None, None
 
 def calcular_fytd(mes, anio):
@@ -176,7 +230,7 @@ def cargar_mapeo_aps(path):
     else:
         raise ValueError(f"Hoja APS tiene {len(df.columns)} columnas inesperadas")
 
-    df['APS']     = df['APS'].astype(str).str.strip().str.upper()
+    df['APS']     = df['APS'].map(norm_aps)
     df['Periodo'] = df['Periodo'].astype(str).str.strip()
     df['Ciudad']  = df['Ciudad'].astype(str).str.strip().str.upper()
     df['Dealer']  = df['Dealer'].astype(str).str.strip()
@@ -262,18 +316,45 @@ def calc_attr_rows(base, obj_row, group_keys, mes_anio, fytd, orden_mes):
                          'gap':round(score-obj_val,4) if not np.isnan(obj_val) else np.nan})
     return rows
 
+def _a_binario(serie):
+    """'Si'/'No' (o 1/2) -> 1/2, que es la codificacion que usa calc_attr_score (1 = Si)."""
+    def f(v):
+        t = _norm(v)
+        if t in ('si', '1', '1.0'): return 1
+        if t in ('no', '2', '2.0', '0'): return 2
+        return np.nan
+    return serie.map(f)
+
 def procesar_isc(arch, nombre, df_aps, df_obj):
-    mes, anio  = extraer_mes_anio(nombre)
-    if not mes: raise ValueError(f"No se pudo extraer mes/anio: {nombre}")
+    """RawData_Servicios (.xlsx): una fila por encuesta respondida."""
+    raw = _leer_hoja(arch)
+    # fila de encabezado: la que dice 'Periodo' en la primera columna
+    hdr_rows = [i for i in range(min(len(raw), 40)) if _norm(raw.iat[i, 0]) == 'periodo']
+    if not hdr_rows: raise ValueError("RawData: no se encontro la fila de encabezado ('Periodo').")
+    h = hdr_rows[0]
+    headers = [_norm(x) for x in raw.iloc[h]]
+    df = raw.iloc[h+1:].reset_index(drop=True)
+    # quitar la fila 'Base' (conteos) y cualquier fila sin periodo AAAAMM
+    df = df[df.iloc[:, 0].astype(str).str.strip().str.fullmatch(r'\d{6}')].reset_index(drop=True)
+    if df.empty: raise ValueError("RawData: sin filas de datos.")
+
+    periodos = sorted(df.iloc[:, 0].astype(str).str.strip().unique())
+    if len(periodos) > 1:
+        raise ValueError(f"RawData trae varios periodos {periodos}; carga un archivo por mes.")
+    anio, mes = periodos[0][:4], MESES_ABR[int(periodos[0][4:]) - 1]
     mes_anio   = f"{mes} {anio}"
     fytd       = calcular_fytd(mes, anio)
     orden_mes  = calcular_orden_mes(mes, anio)
     mapeo_df   = obtener_mapeo_completo(df_aps, mes, anio)
     m_dlr      = dict(zip(mapeo_df['APS'], mapeo_df['Dealer']))
     m_ciu      = dict(zip(mapeo_df['APS'], mapeo_df['Ciudad']))
-    df         = pd.read_excel(arch, engine="xlrd")
-    voc01      = pd.to_numeric(df.iloc[:,22], errors='coerce')
-    aps        = df.iloc[:,17].fillna('SIN ASESOR').astype(str).str.strip().str.upper()
+
+    def col_pregunta(codigo):
+        return _buscar_col(headers, rf'^{re.escape(codigo.lower())}(?![\w.])', codigo)
+
+    voc01 = pd.to_numeric(df.iloc[:, col_pregunta('VOC01')], errors='coerce')
+    i_aps = _buscar_col(headers, r'^nombre completo\s+aps', 'Nombre completo APS')
+    aps   = df.iloc[:, i_aps].map(norm_aps)
     base = pd.DataFrame({
         'mes_anio':mes_anio,'fytd':fytd,'orden_mes':orden_mes,
         'ciudad':aps.map(m_ciu).fillna('Sin Ciudad'),
@@ -283,8 +364,21 @@ def procesar_isc(arch, nombre, df_aps, df_obj):
         'I16':np.where(voc01<=6,1,0),
         'I78':np.where((voc01>=7)&(voc01<=8),1,0),
     })
-    for ci, na in TODOS_ATTR.items():
-        base[na] = pd.to_numeric(df.iloc[:,ci], errors='coerce')
+    # Un VOC01 vacio no es una encuesta valida
+    valido = voc01.notna().values
+    base = base[valido].reset_index(drop=True)
+    df   = df[valido].reset_index(drop=True)
+    # ID de cliente -> asesor (sirve para asignar asesor a las alertas)
+    try:
+        c_idc = _buscar_col(headers, r'^id cliente$', 'ID Cliente')
+        id_aps = dict(zip(df.iloc[:, c_idc].map(_id_txt), base['aps_nombre']))
+    except ValueError:
+        id_aps = {}
+
+    for codigo, na in TODOS_ATTR.items():
+        col = df.iloc[:, col_pregunta(codigo)]
+        base[na] = _a_binario(col) if codigo in ATTR_BINARIO else pd.to_numeric(col, errors='coerce')
+
     obj_row = df_obj[df_obj['fytd']==fytd]
     def agg_isc_fn(g):
         return pd.Series({'total_encuestas':len(g),'prom_isc':isc_pct(g),
@@ -295,11 +389,27 @@ def procesar_isc(arch, nombre, df_aps, df_obj):
     at_aps    = calc_attr_rows(base, obj_row, ['ciudad','dealer','aps_nombre'], mes_anio, fytd, orden_mes)
     return {'isc_base':base,'isc_mensual':m_dlr_df,'isc_aps':m_aps_df,
             'atributos_dlr':pd.DataFrame(at_dlr),'atributos_aps':pd.DataFrame(at_aps),
+            'id_aps':id_aps,
             'mes_anio':mes_anio,'fytd':fytd,'mes':mes,'anio':anio}
 
 def procesar_tre(arch, nombre, df_aps):
-    mes, anio  = extraer_mes_anio(nombre)
-    if not mes: raise ValueError(f"No se pudo extraer mes/anio: {nombre}")
+    """ExtractoVOCEncuestas (.xlsx): una fila por link enviado (realizada / expirada / pendiente)."""
+    raw = _leer_hoja(arch)
+    # encabezado de 2 niveles: la fila con 'CENSO' es la de columnas; la anterior trae ID y Status
+    fila = [i for i in range(min(len(raw), 40)) if any(_norm(x) == 'censo' for x in raw.iloc[i])]
+    if not fila: raise ValueError("Extracto: no se encontro la fila de encabezado ('CENSO').")
+    h = fila[0]
+    headers = [_norm(raw.iat[h, j]) or _norm(raw.iat[h-1, j]) for j in range(raw.shape[1])]
+    # periodo desde el titulo ('... - NOVIEMBRE/2026 - ...')
+    mes = anio = None
+    for i in range(h):
+        for x in raw.iloc[i]:
+            if not mes and isinstance(x, str) and 'sucursal' in _norm(x):
+                mes, anio = _periodo_desde_titulo(x)
+    if not mes: raise ValueError("Extracto: no se pudo leer el mes/anio del titulo del reporte.")
+    df = raw.iloc[h+1:].reset_index(drop=True)
+    df = df[pd.to_numeric(df.iloc[:, 0], errors='coerce').notna()].reset_index(drop=True)
+
     mes_anio   = f"{mes} {anio}"
     fytd       = calcular_fytd(mes, anio)
     orden_mes  = calcular_orden_mes(mes, anio)
@@ -307,15 +417,32 @@ def procesar_tre(arch, nombre, df_aps):
     m_dlr      = dict(zip(mapeo_df['APS'], mapeo_df['Dealer']))
     m_ciu      = dict(zip(mapeo_df['APS'], mapeo_df['Ciudad']))
 
-    df = pd.read_excel(arch, engine="xlrd")
-    df = df.drop_duplicates(subset=[df.columns[3], df.columns[4]], keep='last').copy()
+    c_id   = _buscar_col(headers, r'^id$', 'ID')
+    c_st   = _buscar_col(headers, r'^status$', 'Status')
+    c_env  = _buscar_col(headers, r'^fecha del envio del link', 'Fecha del envio del link')
+    c_cli  = _buscar_col(headers, r'^nombre del cliente', 'Nombre del cliente')
+    c_veh  = _buscar_col(headers, r'^vehiculo', 'Vehiculo')
+    c_vin  = _buscar_col(headers, r'^vin', 'VIN')
+    c_aps  = _buscar_col(headers, r'^nombre vendedor/asesor', 'Nombre Vendedor/Asesor')
 
-    aps    = df.iloc[:,20].fillna('SIN ASESOR').astype(str).str.strip().str.upper()
-    status = df.iloc[:,7].fillna('').astype(str).str.strip()
+    df = df.drop_duplicates(subset=[df.columns[c_id]], keep='last').reset_index(drop=True)
+    aps      = df.iloc[:, c_aps].map(norm_aps)
+    estado_p = df.iloc[:, c_st].fillna('').astype(str).str.replace('\xa0', ' ').str.strip()
+    est_n    = estado_p.map(_norm)
 
-    fechas_validas = pd.to_datetime(df.iloc[:,6], format='mixed', dayfirst=True, errors='coerce')
+    desconocidos = sorted(set(est_n) - {ESTADO_REALIZADA, ESTADO_EXPIRADA} - ESTADOS_PENDIENTES - {''})
+
+    envio = pd.to_datetime(df.iloc[:, c_env], format='mixed', dayfirst=True, errors='coerce')
+    # El reporte nuevo no trae 'Validez': se estima desde la fecha de envio (ver DIAS_VIGENCIA_LINK).
+    # Convencion heredada de la app: vigente mientras hoy <= fecha_validez; se muestra fecha_validez-1.
+    validez = envio + pd.Timedelta(days=DIAS_VIGENCIA_LINK + 1)
+
+    # Vocabulario heredado (la app filtra por estos textos)
+    status = np.where(est_n == ESTADO_REALIZADA, 'Entrevista completa',
+              np.where(est_n == ESTADO_EXPIRADA, 'Expirado',
+              np.where(est_n == '', '', 'Contacto en uso')))
     hoy = pd.Timestamp.today().normalize()
-    status = np.where((status == 'Contacto en uso') & (fechas_validas < hoy), 'Expirado', status)
+    status = np.where((status == 'Contacto en uso') & (validez < hoy), 'Expirado', status)
 
     base = pd.DataFrame({
         'mes_anio':mes_anio,'fytd':fytd,'orden_mes':orden_mes,
@@ -323,7 +450,7 @@ def procesar_tre(arch, nombre, df_aps):
         'dealer':aps.map(m_dlr).fillna('SIN DEALER'),
         'aps_nombre':aps,
         'status':status,
-        'E': np.where((status != '') & (status != 'nan'), 1, 0),
+        'E': np.where(status != '', 1, 0),
         'C': np.where(status=='Entrevista completa',1,0),
         'F': np.where(status=='Contacto en uso',1,0),
     })
@@ -334,21 +461,106 @@ def procesar_tre(arch, nombre, df_aps):
     m_aps_df = base.groupby(['mes_anio','fytd','orden_mes','ciudad','dealer','aps_nombre']).apply(agg_tre).reset_index()
     m_aps_df['prom_tre'] = np.where(m_aps_df['E']>0, m_aps_df['C']/m_aps_df['E'], np.nan)
 
-    m = (status != '') & (status != 'nan')
+    m = (status != '')
     pend = pd.DataFrame({
         'mes_anio':mes_anio,'fytd':fytd,
         'ciudad':base.loc[m,'ciudad'].values,
         'dealer':base.loc[m,'dealer'].values,
         'aps_nombre':base.loc[m,'aps_nombre'].values,
-        'cliente_nombre':df.loc[m].iloc[:,3].astype(str).values,
-        'cliente_celular':df.loc[m].iloc[:,4].astype(str).values,
-        'cliente_mail':df.loc[m].iloc[:,5].astype(str).values,
-        'fecha_validez':df.loc[m].iloc[:,6].astype(str).values,
+        'id_contacto':df.loc[m].iloc[:,c_id].astype(str).values,
+        'cliente_nombre':df.loc[m].iloc[:,c_cli].astype(str).str.strip().values,
+        'vehiculo':df.loc[m].iloc[:,c_veh].astype(str).str.strip().values,
+        'vin':df.loc[m].iloc[:,c_vin].astype(str).str.strip().values,
+        'fecha_envio':envio[m].dt.strftime('%d/%m/%Y').values,
+        'fecha_validez':validez[m].dt.strftime('%d/%m/%Y').values,
         'status':status[m],
+        'estado_proveedor':estado_p[m].values,
     })
 
     return {'tre_base':base,'tre_mensual':m_dlr_df,'tre_aps':m_aps_df,
-            'pendientes':pend,'mes_anio':mes_anio,'fytd':fytd,'mes':mes,'anio':anio}
+            'pendientes':pend,'mes_anio':mes_anio,'fytd':fytd,'mes':mes,'anio':anio,
+            'id_aps':dict(zip(df.iloc[:, c_id].map(_id_txt), aps)),
+            'estados_desconocidos':desconocidos}
+
+COLS_ALERTAS = ['mes_anio','fytd','ciudad','dealer','aps_nombre','id_contacto','cliente_nombre','vehiculo','vin',
+                'satisfaccion','verbalizacion','estado','estado_proveedor','en_tiempo_24h','dias_para_expirar',
+                'cl_fecha_envio','cl_fecha_respuesta','cl_satisfecho','cl_calificacion','cl_verbalizacion']
+
+def _vacio_a_nan(serie):
+    return serie.map(lambda v: np.nan if _norm(v) in ('', '-', 'nan') else v)
+
+def procesar_alertas(arch, nombre, df_aps, id_aps):
+    """AcompanamientoDeAlertas (.xlsx): casos graves (insatisfaccion) que se deben atender en 24 h.
+    El reporte no trae asesor: se asigna por ID de contacto con el RawData/Extracto del mismo mes."""
+    raw = _leer_hoja(arch)
+    fila = [i for i in range(min(len(raw), 40)) if any(_norm(x) == 'censo' for x in raw.iloc[i])]
+    if not fila: raise ValueError("Alertas: no se encontro la fila de encabezado ('CENSO').")
+    h = fila[0]
+    headers = [_norm(raw.iat[h, j]) or _norm(raw.iat[h-1, j]) for j in range(raw.shape[1])]
+    mes = anio = None
+    for i in range(h):
+        for x in raw.iloc[i]:
+            if not mes and isinstance(x, str) and 'sucursal' in _norm(x):
+                mes, anio = _periodo_desde_titulo(x)
+    if not mes: raise ValueError("Alertas: no se pudo leer el mes/anio del titulo del reporte.")
+    df = raw.iloc[h+1:].reset_index(drop=True)
+    df = df[pd.to_numeric(df.iloc[:, 0], errors='coerce').notna()].reset_index(drop=True)
+
+    mes_anio  = f"{mes} {anio}"
+    fytd      = calcular_fytd(mes, anio)
+    mapeo_df  = obtener_mapeo_completo(df_aps, mes, anio)
+    m_dlr     = dict(zip(mapeo_df['APS'], mapeo_df['Dealer']))
+    m_ciu     = dict(zip(mapeo_df['APS'], mapeo_df['Ciudad']))
+
+    if df.empty:
+        return {'alertas': pd.DataFrame(columns=COLS_ALERTAS), 'mes_anio': mes_anio, 'fytd': fytd,
+                'mes': mes, 'anio': anio, 'sin_asesor': [], 'estados_desconocidos': []}
+
+    col = lambda patron, desc: _buscar_col(headers, patron, desc)
+    c_id, c_sat = col(r'^id$', 'ID'), col(r'^satisfaccion con la experiencia', 'Satisfaccion')
+    c_st, c_24  = col(r'^status$', 'STATUS'), col(r'^gestion de alerta en tiempo', 'Gestion de alerta en tiempo (24 hs)')
+    c_dias      = col(r'^dias para expirar', 'Dias para expirar el plazo')
+    verbs       = [i for i, t in enumerate(headers) if t.startswith('verbalizacion')]
+    if len(verbs) < 2: raise ValueError("Alertas: se esperaban 2 columnas 'Verbalizacion' (cuestionario y close loop).")
+    c_fe, c_fr  = col(r'^fecha de envio', 'Fecha de envio'), col(r'^fecha de respuesta', 'Fecha de respuesta')
+    c_ssol, c_cal = col(r'^satisfecho con solucion', 'Satisfecho con solucion'), col(r'^calificacion del alerta', 'Calificacion del Alerta')
+    c_veh, c_cli, c_vin = col(r'^vehiculo', 'Vehiculo'), col(r'^nombre del cliente', 'Nombre del cliente'), col(r'^vin', 'VIN')
+
+    ids = df.iloc[:, c_id].map(_id_txt)
+    aps = ids.map(id_aps).fillna('SIN ASESOR')
+    sin_asesor = sorted(set(ids[aps == 'SIN ASESOR']))
+
+    est_p = df.iloc[:, c_st].fillna('').astype(str).str.replace('\xa0', ' ').str.strip()
+    est_n = est_p.map(_norm)
+    estado = np.where(est_n.str.startswith('a realizar'), 'Pendiente',
+              np.where(est_n.str.startswith('expirado'), 'Vencida', 'Gestionada'))
+    conocidos = est_n.str.startswith('a realizar') | est_n.str.startswith('expirado')
+    desconocidos = sorted(set(est_p[~conocidos]))
+
+    en24 = df.iloc[:, c_24].map(lambda v: 'Sí' if _norm(v) == 'si' else ('No' if _norm(v) == 'no' else ''))
+    out = pd.DataFrame({
+        'mes_anio': mes_anio, 'fytd': fytd,
+        'ciudad': aps.map(m_ciu).fillna('Sin Ciudad').values,
+        'dealer': aps.map(m_dlr).fillna('SIN DEALER').values,
+        'aps_nombre': aps.values,
+        'id_contacto': ids.values,
+        'cliente_nombre': df.iloc[:, c_cli].astype(str).str.strip().values,
+        'vehiculo': df.iloc[:, c_veh].astype(str).str.strip().values,
+        'vin': df.iloc[:, c_vin].astype(str).str.strip().values,
+        'satisfaccion': pd.to_numeric(df.iloc[:, c_sat], errors='coerce').values,
+        'verbalizacion': _vacio_a_nan(df.iloc[:, verbs[0]]).values,
+        'estado': estado, 'estado_proveedor': est_p.values,
+        'en_tiempo_24h': en24.values,
+        'dias_para_expirar': pd.to_numeric(df.iloc[:, c_dias], errors='coerce').values,
+        'cl_fecha_envio': _vacio_a_nan(df.iloc[:, c_fe]).values,
+        'cl_fecha_respuesta': _vacio_a_nan(df.iloc[:, c_fr]).values,
+        'cl_satisfecho': _vacio_a_nan(df.iloc[:, c_ssol]).values,
+        'cl_calificacion': pd.to_numeric(df.iloc[:, c_cal], errors='coerce').values,
+        'cl_verbalizacion': _vacio_a_nan(df.iloc[:, verbs[-1]]).values,
+    })[COLS_ALERTAS]
+    out = out.drop_duplicates(subset=['id_contacto'], keep='last').reset_index(drop=True)
+    return {'alertas': out, 'mes_anio': mes_anio, 'fytd': fytd, 'mes': mes, 'anio': anio,
+            'sin_asesor': sin_asesor, 'estados_desconocidos': desconocidos}
 
 # ==============================================================================
 # UI
@@ -403,7 +615,7 @@ st.markdown("---")
 # ---------------------------------------------------------------------------
 st.subheader("📂 Paso 1 — Archivos del mes")
 ruta_info_local = CARPETA_SALIDA / "INFO_BASE.xlsx"
-col_i, col_isc, col_tre = st.columns(3)
+col_i, col_isc, col_tre, col_alt = st.columns(4)
 
 with col_i:
     st.markdown("**INFO_BASE.xlsx** *(global, único)*")
@@ -416,14 +628,20 @@ with col_i:
     if ruta_info_local.exists(): st.info("📌 Guardado localmente")
 
 with col_isc:
-    st.markdown("**ISC** (`d413a5.xls`)")
-    arch_isc = st.file_uploader("ISC", type=["xls","xlsx"], key="up_isc", label_visibility="collapsed")
+    st.markdown("**ISC** (`RawData_Servicios ... .xlsx`)")
+    arch_isc = st.file_uploader("ISC", type=["xlsx"], key="up_isc", label_visibility="collapsed")
     if arch_isc: st.caption(f"📎 {arch_isc.name}")
 
 with col_tre:
-    st.markdown("**TRE** (`21014a.xls`)")
-    arch_tre = st.file_uploader("TRE", type=["xls","xlsx"], key="up_tre", label_visibility="collapsed")
+    st.markdown("**TRE** (`ExtractoVOCEncuestas ... .xlsx`)")
+    arch_tre = st.file_uploader("TRE", type=["xlsx"], key="up_tre", label_visibility="collapsed")
     if arch_tre: st.caption(f"📎 {arch_tre.name}")
+
+with col_alt:
+    st.markdown("**Alertas** (`AcompanamientoDeAlertas ... .xlsx`)")
+    arch_alt = st.file_uploader("Alertas", type=["xlsx"], key="up_alt", label_visibility="collapsed")
+    if arch_alt: st.caption(f"📎 {arch_alt.name}")
+    else: st.caption("Opcional")
 
 st.markdown("---")
 
@@ -446,7 +664,7 @@ with c_ciu:
 cz, caa, cab, cbtn = st.columns([1,1,1,1])
 with cz:  val_z  = st.number_input("Bien a la primera H1 (%)", min_value=0.0, max_value=100.0, value=0.0, step=1.0)
 with caa: val_aa = st.number_input("Customer Expectations CES (%)", min_value=0.0, max_value=100.0, value=0.0, step=1.0)
-with cab: val_ab = st.number_input("Alertas atendidas 24 Hrs (%)", min_value=0.0, max_value=100.0, value=0.0, step=1.0)
+with cab: val_ab = st.number_input("Alertas 24 Hrs (%) — solo si no hay reporte de alertas", min_value=0.0, max_value=100.0, value=0.0, step=1.0)
 
 with cbtn:
     st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
@@ -582,6 +800,10 @@ if btn:
             arch_tre.seek(0)
             rt = procesar_tre(arch_tre, arch_tre.name, df_aps)
             log.append(f"✅ TRE — {len(rt['tre_base'])} contactos · {rt['mes_anio']}")
+            if rt['mes_anio'] != ri['mes_anio']:
+                raise ValueError(f"El ISC es de {ri['mes_anio']} pero el TRE es de {rt['mes_anio']}. Carga archivos del mismo mes.")
+            if rt['estados_desconocidos']:
+                log.append(f"⚠️ Estados no reconocidos (tratados como pendientes): {', '.join(rt['estados_desconocidos'])}")
 
             prog.progress(85, f"Subiendo TRE → {ciudad_slug}/{anio}_{mes}/...")
             for ruta, df in [
@@ -593,6 +815,21 @@ if btn:
                 guardar_csv(ruta, df)
                 upload_periodo(str(ruta), ruta.name, ciudad_slug, mes, anio)
             log.append(f"   → 02,04,06,09 subidos a {ciudad_slug}/{anio}_{mes}/")
+
+            if arch_alt is not None:
+                prog.progress(92, f"Alertas: {arch_alt.name}...")
+                ra = procesar_alertas(arch_alt, arch_alt.name, df_aps, {**ri['id_aps'], **rt['id_aps']})
+                if ra['mes_anio'] != ri['mes_anio']:
+                    raise ValueError(f"El ISC es de {ri['mes_anio']} pero las Alertas son de {ra['mes_anio']}. Carga archivos del mismo mes.")
+                guardar_csv(RUTA_ALERTAS, ra['alertas'])
+                upload_periodo(str(RUTA_ALERTAS), RUTA_ALERTAS.name, ciudad_slug, mes, anio)
+                al = ra['alertas']
+                log.append(f"✅ Alertas — {len(al)} casos ({(al['estado']=='Pendiente').sum()} pendientes, "
+                           f"{(al['estado']=='Vencida').sum()} vencidas) → 13 subido a {ciudad_slug}/{anio}_{mes}/")
+                if ra['sin_asesor']:
+                    log.append(f"⚠️ Alertas sin asesor (ID no encontrado en RawData/Extracto): {', '.join(ra['sin_asesor'])}")
+                if ra['estados_desconocidos']:
+                    log.append(f"⚠️ Estados de alerta no reconocidos (se muestran como 'Gestionada'): {', '.join(ra['estados_desconocidos'])}")
 
             prog.progress(100, "✅ Listo")
             st.markdown("<div class='success-box'>" + "<br>".join(log) + "</div>", unsafe_allow_html=True)
@@ -615,6 +852,7 @@ opciones = {
     "05-Atrib×Dealer":RUTA_ATRIBUTOS,"06-Pendientes":RUTA_PENDIENTES,
     "07-Objetivos":RUTA_OBJETIVOS,"08-ISC×APS":RUTA_ISC_APS,
     "09-TRE×APS":RUTA_TRE_APS,"10-Atrib×APS":RUTA_ATRIB_APS,
+    "13-Alertas":RUTA_ALERTAS,
 }
 sel = st.selectbox("CSV:", list(opciones.keys()))
 rsel = opciones[sel]
