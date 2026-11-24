@@ -103,6 +103,9 @@ RUTA_ATRIB_APS   = CARPETA_SALIDA / "10_atributos_aps.csv"
 RUTA_ESPECIALES  = CARPETA_SALIDA / "11_atributos_especiales.csv"
 RUTA_VERBALIZACIONES = CARPETA_SALIDA / "12_verbalizaciones.csv"
 RUTA_ALERTAS     = CARPETA_SALIDA / "13_alertas.csv"
+RUTA_DRIVERS     = CARPETA_SALIDA / "14_drivers.csv"
+RUTA_COMENTARIOS = CARPETA_SALIDA / "15_comentarios.csv"
+RUTA_EMBUDO      = CARPETA_SALIDA / "16_embudo.csv"
 
 # Atributos identificados por CODIGO de pregunta (encabezado del RawData), no por posicion.
 # Atributos identificados por CODIGO de pregunta (encabezado del RawData), no por posicion.
@@ -316,6 +319,120 @@ def calc_attr_rows(base, obj_row, group_keys, mes_anio, fytd, orden_mes):
                          'gap':round(score-obj_val,4) if not np.isnan(obj_val) else np.nan})
     return rows
 
+def construir_verbalizaciones(base, cods, mes_anio, fytd, mes, orden_mes):
+    """Verbalizaciones por tema, a partir de VOC02/VOC04 'Codificacion' del RawData.
+
+    Cada codificacion es 'Positivo - Tema; Negativo - Otro tema' (o 'No verbalizado - ...').
+    Definiciones (supuestos, ya no existe la tabla agregada del proveedor):
+      - Un cliente 'menciona' un tema si aparece en VOC02 o VOC04 (se cuenta una vez por cliente).
+      - Base = clientes con al menos un tema codificado, por ciudad y mes.
+      - Comentarios relacionados = clientes que mencionan el tema / base (en %).
+      - Satisfaccion neta = ISC (VOC01) solo de los clientes que mencionan el tema (en %).
+    """
+    temas = []
+    for i in range(len(base)):
+        conj = set()
+        for c in cods:
+            v = c.iat[i]
+            if pd.isna(v): continue
+            for tok in str(v).split(';'):
+                tok = tok.strip()
+                if not tok or _norm(tok).startswith('no verbalizado') or ' - ' not in tok: continue
+                signo, tema = tok.split(' - ', 1)
+                conj.add((signo.strip().capitalize(), tema.strip()))
+        temas.append(conj)
+
+    filas = []
+    for ciudad, g in base.groupby('ciudad'):
+        if ciudad == 'Sin Ciudad': continue
+        idx = [i for i in g.index if temas[i]]
+        if not idx: continue
+        por_tema = {}
+        for i in idx:
+            for signo, tema in temas[i]:
+                por_tema.setdefault(tema, {})[i] = por_tema.setdefault(tema, {}).get(i, set()) | {signo}
+        for tema, clientes in por_tema.items():
+            n = len(clientes)
+            i16 = int(sum(base.at[i, 'I16'] for i in clientes))
+            i78 = int(sum(base.at[i, 'I78'] for i in clientes))
+            pos = sum('Positivo' in sg for sg in clientes.values())
+            neg = sum('Negativo' in sg for sg in clientes.values())
+            filas.append({
+                'Categoría': 'Positivo' if pos > neg else ('Negativo' if neg > pos else 'Mixto'),
+                'Sub-Categoría': tema,
+                'Variación': f"{pos} positivos / {neg} negativos",
+                'n_pos': pos, 'n_neg': neg,
+                'Comentarios relacionados': round(n / len(idx) * 100, 1),
+                'SATISFACCIÓN NETA': round((n - 2 * i16 - i78) / n * 100, 1),
+                'n_menciones': n, 'n_base': len(idx), 'n_i16': i16, 'n_i78': i78,
+                'fytd': fytd, 'mes': mes, 'ciudad': ciudad,
+                'mes_anio': mes_anio, 'orden_mes': orden_mes,
+            })
+    cols = ['Categoría', 'Sub-Categoría', 'Variación', 'Comentarios relacionados', 'SATISFACCIÓN NETA',
+            'n_menciones', 'n_base', 'n_i16', 'n_i78', 'n_pos', 'n_neg', 'fytd', 'mes', 'ciudad', 'mes_anio', 'orden_mes']
+    return pd.DataFrame(filas, columns=cols)
+
+def _sentimiento(cod):
+    """'Positivo - X; Negativo - Y' -> Positivo / Negativo / Mixto / Sin tema."""
+    if cod is None or (isinstance(cod, float) and np.isnan(cod)): return "Sin tema"
+    toks = [_norm(t) for t in str(cod).split(';') if t.strip() and not _norm(t).startswith('no verbalizado')]
+    pos = any(t.startswith('positivo') for t in toks); neg = any(t.startswith('negativo') for t in toks)
+    return "Mixto" if pos and neg else ("Positivo" if pos else ("Negativo" if neg else "Sin tema"))
+
+COLS_COMENTARIOS = ['mes_anio', 'fytd', 'orden_mes', 'ciudad', 'dealer', 'aps_nombre', 'id_contacto', 'satisfaccion',
+                    'pregunta', 'comentario', 'temas', 'sentimiento']
+
+def construir_comentarios(base, df, headers, mes_anio, fytd, orden_mes, ids):
+    """Comentarios reales del cliente (VOC02, VOC04 y VOC07) con sus temas codificados.
+    No incluye nombre del cliente ni VIN: solo asesor, dealer, nota y texto."""
+    pregs = [("Motivo de la calificación", r'^voc02 (?!codificacion)', r'^voc02 codificacion'),
+             ("Qué mejorar", r'^voc04 (?!codificacion)', r'^voc04 codificacion'),
+             ("Por qué no quedó bien a la primera", r'^voc07', None)]
+    filas = []
+    for nombre, pat_t, pat_c in pregs:
+        try: ct = _buscar_col(headers, pat_t, nombre)
+        except ValueError: continue
+        cc = None
+        if pat_c:
+            try: cc = _buscar_col(headers, pat_c, nombre + ' codificacion')
+            except ValueError: cc = None
+        for i in range(len(df)):
+            txt = df.iat[i, ct]
+            if pd.isna(txt) or not str(txt).strip() or str(txt).strip() == '-': continue
+            cod = df.iat[i, cc] if cc is not None else None
+            filas.append({
+                'mes_anio': mes_anio, 'fytd': fytd, 'orden_mes': orden_mes,
+                'ciudad': base.at[i, 'ciudad'], 'dealer': base.at[i, 'dealer'], 'aps_nombre': base.at[i, 'aps_nombre'],
+                'id_contacto': ids[i] if ids is not None else '', 'satisfaccion': base.at[i, 'voc01'],
+                'pregunta': nombre, 'comentario': re.sub(r'\s+', ' ', str(txt)).strip(),
+                'temas': '' if (cod is None or pd.isna(cod)) else str(cod).strip(),
+                'sentimiento': _sentimiento(cod) if cc is not None else 'Negativo'})
+    return pd.DataFrame(filas, columns=COLS_COMENTARIOS)
+
+def calcular_drivers(base, mes_anio, fytd, orden_mes):
+    """Sumas para medir cuanto se relaciona cada atributo con la satisfaccion general (VOC01).
+
+    Por ciudad y dealer guarda n, Σx, Σy, Σx², Σy², Σxy (x = nota del atributo, y = VOC01, solo pares completos).
+    Con esas sumas el portal calcula la correlacion de Pearson de cualquier combinacion de meses y dealers
+    sin cargar las encuestas una por una. En atributos Si/No, x vale 1 (Si) o 0 (No)."""
+    filas = []
+    for (ciudad, dealer), g in base.groupby(['ciudad', 'dealer']):
+        y = pd.to_numeric(g['voc01'], errors='coerce')
+        for codigo, nombre in TODOS_ATTR.items():
+            x = g[nombre]
+            es_bin = codigo in ATTR_BINARIO
+            if es_bin: x = (x == 1).astype(float).where(x.notna())
+            m = x.notna() & y.notna()
+            n = int(m.sum())
+            if n < 2: continue
+            xv = x[m].astype(float); yv = y[m].astype(float)
+            filas.append({'mes_anio': mes_anio, 'fytd': fytd, 'orden_mes': orden_mes, 'ciudad': ciudad, 'dealer': dealer,
+                          'atributo': nombre, 'es_binario': es_bin, 'n': n,
+                          'sx': float(xv.sum()), 'sy': float(yv.sum()), 'sxx': float((xv**2).sum()),
+                          'syy': float((yv**2).sum()), 'sxy': float((xv * yv).sum())})
+    return pd.DataFrame(filas, columns=['mes_anio', 'fytd', 'orden_mes', 'ciudad', 'dealer', 'atributo', 'es_binario',
+                                        'n', 'sx', 'sy', 'sxx', 'syy', 'sxy'])
+
 def _a_binario(serie):
     """'Si'/'No' (o 1/2) -> 1/2, que es la codificacion que usa calc_attr_score (1 = Si)."""
     def f(v):
@@ -379,18 +496,76 @@ def procesar_isc(arch, nombre, df_aps, df_obj):
         col = df.iloc[:, col_pregunta(codigo)]
         base[na] = _a_binario(col) if codigo in ATTR_BINARIO else pd.to_numeric(col, errors='coerce')
 
+    # VOC09 (expectativa 1-5): base del indicador CES
+    try:    base['voc09'] = pd.to_numeric(df.iloc[:, col_pregunta('VOC09')], errors='coerce')
+    except ValueError: base['voc09'] = np.nan
+
+    # Verbalizaciones codificadas por tema (VOC02 y VOC04)
+    cods = []
+    for patron in (r'^voc02 codificacion', r'^voc04 codificacion'):
+        try: cods.append(df.iloc[:, _buscar_col(headers, patron, patron)].reset_index(drop=True))
+        except ValueError: pass
+    verb = construir_verbalizaciones(base, cods, mes_anio, fytd, mes, orden_mes)
+    drivers = calcular_drivers(base, mes_anio, fytd, orden_mes)
+    _ids = df.iloc[:, c_idc].map(_id_txt).tolist() if 'c_idc' in locals() else None
+    comentarios = construir_comentarios(base, df, headers, mes_anio, fytd, orden_mes, _ids)
+
     obj_row = df_obj[df_obj['fytd']==fytd]
     def agg_isc_fn(g):
+        # Conteos de H1 (VOC06) y CES (VOC09): el portal los suma, asi no necesita cargar las encuestas una por una
+        h1 = g['Bien a la primera H1'].dropna(); v9 = g['voc09'].dropna()
         return pd.Series({'total_encuestas':len(g),'prom_isc':isc_pct(g),
-                          'I16':int(g['I16'].sum()),'I78':int(g['I78'].sum())})
+                          'I16':int(g['I16'].sum()),'I78':int(g['I78'].sum()),
+                          'h1_n':len(h1),'h1_si':int((h1==1).sum()),
+                          'ces_n':len(v9),'ces_c4':int((v9>=4).sum()),'ces_c5':int((v9>=5).sum())})
     m_dlr_df  = base.groupby(['mes_anio','fytd','orden_mes','ciudad','dealer']).apply(agg_isc_fn).reset_index()
     m_aps_df  = base.groupby(['mes_anio','fytd','orden_mes','ciudad','dealer','aps_nombre']).apply(agg_isc_fn).reset_index()
     at_dlr    = calc_attr_rows(base, obj_row, ['ciudad','dealer'], mes_anio, fytd, orden_mes)
     at_aps    = calc_attr_rows(base, obj_row, ['ciudad','dealer','aps_nombre'], mes_anio, fytd, orden_mes)
     return {'isc_base':base,'isc_mensual':m_dlr_df,'isc_aps':m_aps_df,
             'atributos_dlr':pd.DataFrame(at_dlr),'atributos_aps':pd.DataFrame(at_aps),
-            'id_aps':id_aps,
+            'id_aps':id_aps, 'verbalizaciones':verb, 'drivers':drivers, 'comentarios':comentarios,
             'mes_anio':mes_anio,'fytd':fytd,'mes':mes,'anio':anio}
+
+def construir_embudo(df, base, headers, envio, est_n, mes_anio, fytd, orden_mes):
+    """Embudo de envio por ciudad / dealer / asesor: enviadas -> entregadas -> abiertas -> interactuaron -> respondieron,
+    mas canal de respuesta, tiempo de respuesta y dia de la semana del envio. Solo conteos (sin datos del cliente)."""
+    def col(patron):
+        try: return _buscar_col(headers, patron, patron)
+        except ValueError: return None
+    def serie(idx, f=lambda x: x):
+        return df.iloc[:, idx].map(_norm) if idx is not None else pd.Series('', index=df.index)
+    c_int, c_em, c_wa = col(r'^hubo interaccion'), col(r'^status del envio \(e-mail\)'), col(r'^status del envio \(whatsapp\)')
+    c_eo, c_wo = col(r'^e-mail fue abierto'), col(r'^whatsapp fue abierto')
+    c_resp, c_med, c_niv = col(r'^fecha de respuesta'), col(r'^medio por lo cual'), col(r'^nivel de respuesta')
+
+    entregada = serie(c_em).str.startswith('e-mail recibido') | serie(c_wa).str.startswith('whatsapp recibido')
+    abierta = (serie(c_eo) == 'si') | (serie(c_wo) == 'si')
+    interactuo = serie(c_int) == 'si'
+    realizada = est_n == ESTADO_REALIZADA
+    medio = serie(c_med)
+    resp = pd.to_datetime(df.iloc[:, c_resp], format='mixed', dayfirst=True, errors='coerce') if c_resp is not None else pd.Series(pd.NaT, index=df.index)
+    dias = (resp.dt.normalize() - envio.dt.normalize()).dt.days.where(realizada)
+    dow = envio.dt.dayofweek.fillna(-1).astype(int)
+
+    e = pd.DataFrame({
+        'ciudad': base['ciudad'].values, 'dealer': base['dealer'].values, 'aps_nombre': base['aps_nombre'].values,
+        'enviadas': 1, 'entregadas': entregada.astype(int).values, 'abiertas': abierta.astype(int).values,
+        'interactuaron': interactuo.astype(int).values, 'interrumpidas': (est_n == 'encuesta interrumpida').astype(int).values,
+        'realizadas': realizada.astype(int).values,
+        'opcionales': (realizada & serie(c_niv).str.startswith('opcionales')).astype(int).values,
+        'resp_whatsapp': (realizada & medio.str.contains('whats')).astype(int).values,
+        'resp_email': (realizada & medio.str.contains('mail')).astype(int).values,
+        't_n': dias.notna().astype(int).values, 't_sum': dias.clip(lower=0).fillna(0).values,
+        't_0': (dias <= 0).astype(int).values, 't_1': (dias == 1).astype(int).values,
+        't_2_3': dias.between(2, 3).astype(int).values, 't_4mas': (dias >= 4).astype(int).values,
+    })
+    for d_ in range(7):
+        e[f'env_d{d_}'] = (dow == d_).astype(int).values
+        e[f'real_d{d_}'] = ((dow == d_) & realizada).astype(int).values
+    out = e.groupby(['ciudad', 'dealer', 'aps_nombre']).sum().reset_index()
+    out.insert(0, 'orden_mes', orden_mes); out.insert(0, 'fytd', fytd); out.insert(0, 'mes_anio', mes_anio)
+    return out
 
 def procesar_tre(arch, nombre, df_aps):
     """ExtractoVOCEncuestas (.xlsx): una fila por link enviado (realizada / expirada / pendiente)."""
@@ -477,8 +652,10 @@ def procesar_tre(arch, nombre, df_aps):
         'estado_proveedor':estado_p[m].values,
     })
 
+    embudo = construir_embudo(df, base, headers, envio, est_n, mes_anio, fytd, orden_mes)
+
     return {'tre_base':base,'tre_mensual':m_dlr_df,'tre_aps':m_aps_df,
-            'pendientes':pend,'mes_anio':mes_anio,'fytd':fytd,'mes':mes,'anio':anio,
+            'pendientes':pend,'embudo':embudo,'mes_anio':mes_anio,'fytd':fytd,'mes':mes,'anio':anio,
             'id_aps':dict(zip(df.iloc[:, c_id].map(_id_txt), aps)),
             'estados_desconocidos':desconocidos}
 
@@ -662,8 +839,8 @@ with c_ciu:
     ciudad_esp = st.selectbox("Selecciona Ciudad:", opciones_ciudad, key="esp_ciu")
 
 cz, caa, cab, cbtn = st.columns([1,1,1,1])
-with cz:  val_z  = st.number_input("Bien a la primera H1 (%)", min_value=0.0, max_value=100.0, value=0.0, step=1.0)
-with caa: val_aa = st.number_input("Customer Expectations CES (%)", min_value=0.0, max_value=100.0, value=0.0, step=1.0)
+with cz:  val_z  = st.number_input("Bien a la primera H1 (%) — solo meses sin RawData", min_value=0.0, max_value=100.0, value=0.0, step=1.0)
+with caa: val_aa = st.number_input("Customer Expectations CES (%) — solo meses sin RawData", min_value=0.0, max_value=100.0, value=0.0, step=1.0)
 with cab: val_ab = st.number_input("Alertas 24 Hrs (%) — solo si no hay reporte de alertas", min_value=0.0, max_value=100.0, value=0.0, step=1.0)
 
 with cbtn:
@@ -697,52 +874,6 @@ with cbtn:
             df_c_esp.to_csv(RUTA_ESPECIALES, index=False)
             upload_dealer(str(RUTA_ESPECIALES), "11_atributos_especiales.csv", ciudad_slug)
             st.success(f"✅ Especiales de {ciudad_seleccionada} ({mes_esp} {fytd_esp}) guardados.")
-
-# ---------------------------------------------------------------------------
-# Carga Manual — Verbalizaciones
-# ---------------------------------------------------------------------------
-st.markdown("---")
-st.subheader("🗣️ Carga Manual — Verbalizaciones del Cliente")
-
-c_fy_v, c_mo_v, c_ciu_v = st.columns(3)
-with c_fy_v:
-    fytd_verb = st.selectbox("Selecciona FYTD:", opciones_fytd, key="v_fytd")
-with c_mo_v:
-    mes_verb = st.selectbox("Selecciona Mes:", meses_fytd_orden, key="v_mes")
-with c_ciu_v:
-    ciudad_verb = st.selectbox("Selecciona Ciudad:", opciones_ciudad, key="v_ciu")
-
-st.markdown("Pega tu tabla directamente en la celda vacía de abajo (puedes usar **Ctrl+V** desde Excel):")
-
-columnas_verb = [
-    "Categoría", "Sub-Categoría", "Variación",
-    "Comentarios relacionados", "SATISFACCIÓN NETA", "Por SATISFACCIÓN NETA", "Detalle 1", "Detalle 2"
-]
-df_verb_vacio = pd.DataFrame(columns=columnas_verb)
-df_verb_editado = st.data_editor(df_verb_vacio, num_rows="dynamic", use_container_width=True, key="editor_verb")
-
-with st.columns([1,2,1])[1]:
-    st.markdown("<div style='margin-top:10px'></div>", unsafe_allow_html=True)
-    if st.button("💾 Guardar Verbalizaciones", use_container_width=True):
-        if ciudad_seleccionada == "-- Selecciona Ciudad --":
-            st.error("❌ Selecciona la Ciudad (Paso 0) antes de guardar.")
-        elif not df_verb_editado.empty:
-            ciudad_slug = CIUDADES[ciudad_seleccionada]
-            anio_verb   = anio_desde_fytd_mes(fytd_verb, mes_verb)
-            df_verb_editado['fytd']   = fytd_verb
-            df_verb_editado['mes']    = mes_verb
-            df_verb_editado['ciudad'] = ciudad_verb
-
-            # Agregar mes_anio y orden_mes para que app.py pueda usar meses_de()
-            df_verb_editado['mes_anio']  = f"{mes_verb} {anio_verb}"
-            df_verb_editado['orden_mes'] = int(anio_verb) * 100 + MESES_NUM.get(mes_verb, 0)
-
-            # Guardar como archivo de período (mismo esquema que archivos 01-10)
-            df_verb_editado.to_csv(RUTA_VERBALIZACIONES, index=False)
-            upload_periodo(str(RUTA_VERBALIZACIONES), "12_verbalizaciones.csv", ciudad_slug, mes_verb, anio_verb)
-            st.success(f"✅ Verbalizaciones de {ciudad_seleccionada} — {mes_verb} {anio_verb} guardadas.")
-        else:
-            st.warning("⚠️ La tabla está vacía. Pega los datos antes de guardar.")
 
 st.markdown("---")
 
@@ -791,10 +922,15 @@ if btn:
                 (RUTA_ISC_APS,     ri['isc_aps']),
                 (RUTA_ATRIBUTOS,   ri['atributos_dlr']),
                 (RUTA_ATRIB_APS,   ri['atributos_aps']),
+                (RUTA_DRIVERS,     ri['drivers']),
+                (RUTA_COMENTARIOS, ri['comentarios']),
             ]:
                 guardar_csv(ruta, df)
                 upload_periodo(str(ruta), ruta.name, ciudad_slug, mes, anio)
-            log.append(f"   → 01,03,05,08,10 subidos a {ciudad_slug}/{anio}_{mes}/")
+            log.append(f"   → 01,03,05,08,10,14,15 subidos a {ciudad_slug}/{anio}_{mes}/ ({len(ri['comentarios'])} comentarios)")
+            guardar_csv(RUTA_VERBALIZACIONES, ri['verbalizaciones'])
+            upload_periodo(str(RUTA_VERBALIZACIONES), RUTA_VERBALIZACIONES.name, ciudad_slug, mes, anio)
+            log.append(f"✅ Verbalizaciones — {ri['verbalizaciones']['Sub-Categoría'].nunique()} temas (12 subido, calculado del RawData)")
 
             prog.progress(65, f"TRE: {arch_tre.name}...")
             arch_tre.seek(0)
@@ -811,10 +947,11 @@ if btn:
                 (RUTA_TRE_MENSUAL, rt['tre_mensual']),
                 (RUTA_TRE_APS,     rt['tre_aps']),
                 (RUTA_PENDIENTES,  rt['pendientes']),
+                (RUTA_EMBUDO,      rt['embudo']),
             ]:
                 guardar_csv(ruta, df)
                 upload_periodo(str(ruta), ruta.name, ciudad_slug, mes, anio)
-            log.append(f"   → 02,04,06,09 subidos a {ciudad_slug}/{anio}_{mes}/")
+            log.append(f"   → 02,04,06,09,16 subidos a {ciudad_slug}/{anio}_{mes}/")
 
             if arch_alt is not None:
                 prog.progress(92, f"Alertas: {arch_alt.name}...")
@@ -852,7 +989,11 @@ opciones = {
     "05-Atrib×Dealer":RUTA_ATRIBUTOS,"06-Pendientes":RUTA_PENDIENTES,
     "07-Objetivos":RUTA_OBJETIVOS,"08-ISC×APS":RUTA_ISC_APS,
     "09-TRE×APS":RUTA_TRE_APS,"10-Atrib×APS":RUTA_ATRIB_APS,
+    "12-Verbalizaciones":RUTA_VERBALIZACIONES,
     "13-Alertas":RUTA_ALERTAS,
+    "14-Palancas":RUTA_DRIVERS,
+    "15-Comentarios":RUTA_COMENTARIOS,
+    "16-Embudo":RUTA_EMBUDO,
 }
 sel = st.selectbox("CSV:", list(opciones.keys()))
 rsel = opciones[sel]

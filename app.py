@@ -7,11 +7,11 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
-from scipy.interpolate import make_interp_spline
 import io, textwrap
 import os
 from pathlib import Path
 from PIL import Image
+from ui_theme import aplicar_estilos, C, COLORWAY, plotly_layout, mostrar_plotly, kpi_card, delta_chip
 
 st.set_page_config(page_title="Portal VoC Taiyo", layout="wide", initial_sidebar_state="expanded")
 
@@ -105,8 +105,8 @@ def cargar_datos():
 
     # Mapa nombre-de-archivo → clave interna
     ARCHIVOS_PERIODO = {
-        "01_isc_base.csv"            : "isc_base",
-        "02_tre_base.csv"            : "tre_base",
+        # 01_isc_base y 02_tre_base (una fila por encuesta/contacto) NO se cargan: el portal no los usa
+        # y ocupaban la mayor parte de la memoria y del tiempo de carga.
         "03_isc_mensual_dealer.csv"  : "isc_mensual",
         "04_tre_mensual_dealer.csv"  : "tre_mensual",
         "05_atributos_resumen.csv"   : "atributos",
@@ -116,6 +116,9 @@ def cargar_datos():
         "10_atributos_aps.csv"       : "atrib_aps",
         "12_verbalizaciones.csv"     : "verbaliz",
         "13_alertas.csv"             : "alertas",
+        "14_drivers.csv"             : "drivers",
+        "15_comentarios.csv"         : "comentarios",
+        "16_embudo.csv"              : "embudo",
     }
     ARCHIVOS_CIUDAD = {
         "11_atributos_especiales.csv": "especiales",
@@ -129,37 +132,26 @@ def cargar_datos():
     dfs_obj = pd.read_csv(io.BytesIO(blob_obj.download_as_bytes()), low_memory=False) \
               if blob_obj.exists() else pd.DataFrame()
 
-    # Recorrer todos los blobs
+    # Recorrer los blobs y descargar en paralelo solo los archivos que el portal usa
+    trabajos = []   # (clave, nombre_blob)
     for blob in bucket.list_blobs(prefix="datos_procesados/"):
         partes = blob.name.split("/")
         n = len(partes)
+        if n == 4 and partes[3] in TODOS_ARCHIVOS:          # ciudad/periodo/archivo
+            trabajos.append((TODOS_ARCHIVOS[partes[3]], blob.name))
+        elif n == 3 and partes[2] in ARCHIVOS_CIUDAD:        # ciudad/archivo
+            trabajos.append((ARCHIVOS_CIUDAD[partes[2]], blob.name))
+        elif n == 2 and partes[1] in TODOS_ARCHIVOS:         # estructura antigua (raíz)
+            trabajos.append((TODOS_ARCHIVOS[partes[1]], blob.name))
 
-        if n == 4:
-            # Nueva estructura: datos_procesados/{ciudad}/{periodo}/{archivo}
-            archivo = partes[3]
-            if archivo in TODOS_ARCHIVOS:
-                clave = TODOS_ARCHIVOS[archivo]
-                acum[clave].append(
-                    pd.read_csv(io.BytesIO(blob.download_as_bytes()), low_memory=False)
-                )
+    def _bajar(job):
+        clave, nombre = job
+        return clave, pd.read_csv(io.BytesIO(bucket.blob(nombre).download_as_bytes()), low_memory=False)
 
-        elif n == 3:
-            # Nivel ciudad (sin período): datos_procesados/{ciudad}/{archivo}
-            archivo = partes[2]
-            if archivo in ARCHIVOS_CIUDAD:
-                clave = ARCHIVOS_CIUDAD[archivo]
-                acum[clave].append(
-                    pd.read_csv(io.BytesIO(blob.download_as_bytes()), low_memory=False)
-                )
-
-        elif n == 2:
-            # Estructura antigua (compatibilidad): datos_procesados/{archivo}
-            archivo = partes[1]
-            if archivo in TODOS_ARCHIVOS:
-                clave = TODOS_ARCHIVOS[archivo]
-                acum[clave].append(
-                    pd.read_csv(io.BytesIO(blob.download_as_bytes()), low_memory=False)
-                )
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for clave, df_leido in pool.map(_bajar, trabajos):
+            acum[clave].append(df_leido)
 
     # Consolidar
     dfs = {"objetivos": dfs_obj}
@@ -185,6 +177,12 @@ def cargar_datos():
                 df_concat = df_concat.drop_duplicates(
                     subset=["mes_anio", "ciudad", "dealer", "atributo"], keep="last"
                 )
+            elif clave == "embudo":
+                df_concat = df_concat.drop_duplicates(subset=["mes_anio", "ciudad", "dealer", "aps_nombre"], keep="last")
+            elif clave == "comentarios":
+                df_concat = df_concat.drop_duplicates(subset=["mes_anio", "id_contacto", "pregunta"], keep="last")
+            elif clave == "drivers":
+                df_concat = df_concat.drop_duplicates(subset=["mes_anio", "ciudad", "dealer", "atributo"], keep="last")
             elif clave == "alertas":
                 df_concat = df_concat.drop_duplicates(subset=["mes_anio", "id_contacto"], keep="last")
             elif clave == "atrib_aps":
@@ -385,42 +383,7 @@ def kpi_html(label,val,fmt="{:.1%}",sub="",color="#1A1A2E"):
 # CSS
 # ==============================================================================
 
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;900&family=Barlow:wght@400;500;600&display=swap');
-html,body,[class*="css"]{font-family:'Barlow',sans-serif!important}
-[data-testid="stSidebar"]{background:#1A1A2E!important;min-width:230px!important;max-width:230px!important}
-[data-testid="stSidebar"] *{color:#E0E0E0!important}
-[data-testid="stSidebarNav"]{display:none!important}
-[data-testid="stSidebar"] .stButton>button{background:transparent!important;border:none!important;border-left:3px solid transparent!important;border-radius:0!important;text-align:left!important;width:100%!important;padding:8px 16px!important;font-family:'Barlow Condensed',sans-serif!important;font-size:15px!important;font-weight:600!important;transition:all 0.15s ease!important}
-[data-testid="stSidebar"] .stButton>button:hover{background:rgba(255,255,255,0.08)!important;border-left:3px solid #FFD600!important}
-[data-testid="stSidebar"] .stButton>button p,[data-testid="stSidebar"] .stButton>button:hover p{font-size:15px!important}
-[data-testid="stSidebar"] hr{border-color:rgba(255,255,255,0.12)!important}
-section[data-testid="stMain"]{background:#F5F6FA!important}
-.block-container{padding-top:1rem!important;max-width:100%!important}
-.ciudad-banner{background:#1A1A2E;border-radius:10px;padding:12px 20px;margin-bottom:16px;display:flex;align-items:center;gap:16px}
-.ciudad-label{font-family:'Barlow Condensed',sans-serif;font-size:13px;font-weight:700;color:#FFD600;letter-spacing:1px;text-transform:uppercase;white-space:nowrap}
-.seccion-titulo{font-family:'Barlow Condensed',sans-serif;font-size:26px;font-weight:900;color:#1A1A2E;letter-spacing:1px;text-transform:uppercase;border-bottom:3px solid #FFD600;padding-bottom:6px;margin-bottom:16px}
-.kpi-card{background:white;border-radius:10px;padding:14px 18px;box-shadow:0 2px 8px rgba(0,0,0,0.08);border-top:4px solid #1A1A2E;text-align:center}
-.kpi-label{font-family:'Barlow Condensed',sans-serif;font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:#666;margin-bottom:2px}
-.kpi-value{font-family:'Barlow Condensed',sans-serif;font-size:34px;font-weight:900;color:#1A1A2E;line-height:1}
-.kpi-sub{font-size:11px;color:#999;margin-top:2px}
-.chart-box{background:white;border-radius:10px;padding:16px 20px;box-shadow:0 2px 8px rgba(0,0,0,0.07);margin-bottom:16px}
-.tabla-voc th{background:#1A1A2E!important;color:white!important;font-family:'Barlow Condensed',sans-serif;font-size:12px;font-weight:700;text-align:center;padding:7px 8px}
-.tabla-voc td{font-size:12px;text-align:center;padding:5px 8px;color:#1A1A1A}
-.tabla-voc tr:nth-child(even) td{background:#F8F8F8}
-.alerta-card{background:#fff3f3;border-left:5px solid #D32F2F;border-radius:6px;padding:10px 14px;margin-bottom:8px;font-family:'Barlow Condensed',sans-serif}
-.alerta-card .an{font-size:15px;font-weight:700;color:#1A1A1A}
-.alerta-card .av{font-size:20px;font-weight:900;color:#D32F2F}
-.alerta-card .ag{font-size:12px;color:#888}
-.table-scroll{overflow-x:auto;border-radius:8px}
-div[data-testid="stSelectbox"] label p{font-weight:700!important;font-size:12px!important;color:#1A1A2E!important;text-transform:uppercase;letter-spacing:0.5px}
-/* Contraste: textos del área principal legibles aunque el navegador use tema oscuro */
-section[data-testid="stMain"] [data-testid="stMarkdownContainer"]{color:#1A1A2E}
-section[data-testid="stMain"] [data-testid="stWidgetLabel"] p{color:#1A1A2E!important;font-weight:700!important}
-section[data-testid="stMain"] [data-testid="stCaptionContainer"],section[data-testid="stMain"] [data-testid="stCaptionContainer"] p{color:#555!important}
-</style>
-""", unsafe_allow_html=True)
+aplicar_estilos()
 
 # ==============================================================================
 # ACCESO CON CONTRASEÑA (definida en st.secrets["app_password"])
@@ -468,8 +431,12 @@ if "seccion" not in st.session_state: st.session_state.seccion = "caratula"
 if "perfil" not in st.session_state: st.session_state.perfil = None
 if "ciudad_sel" not in st.session_state: st.session_state.ciudad_sel = "TODAS"
 
+import time as _time
+_t0 = _time.perf_counter()
 with st.spinner("Cargando datos desde GCS (puede tardar en la primera carga)..."):
     D = cargar_datos()
+_dt = _time.perf_counter() - _t0
+if _dt > 0.5: st.session_state["t_carga"] = _dt   # solo cuando realmente descargó (no desde caché)
 
 if D["isc_mensual"].empty and D["tre_mensual"].empty:
     st.warning("Sin datos. Ejecuta primero preprocesador.py.")
@@ -547,6 +514,16 @@ def registrar_envios_gcs(registros):
     except Exception:
         return False
 
+@st.cache_data(ttl=300, show_spinner=False)
+def cargar_log_envios():
+    """Lee el log de envíos de Kaizen (solo lectura). DataFrame vacío si no existe o falla."""
+    try:
+        blob = _bucket_gcs().blob(RUTA_LOG_ENVIOS)
+        if not blob.exists(): return pd.DataFrame()
+        return pd.read_csv(io.BytesIO(blob.download_as_bytes()), dtype=str)
+    except Exception:
+        return pd.DataFrame()
+
 def periodo_mes_actual(ciudad):
     """Último FYTD y último mes con datos de APS."""
     if not todos_fytd: return None, None
@@ -555,6 +532,10 @@ def periodo_mes_actual(ciudad):
     return fytd, (meses[-1] if meses else None)
 
 _ORDEN_ALERTA = {"Pendiente": 0, "Vencida": 1, "Gestionada": 2}
+
+# CES = % de clientes que califican 5 (de 5) cuánto la experiencia cumplió sus expectativas (VOC09).
+# SUPUESTO: el reporte nuevo no trae la fórmula del proveedor; cambiar a 4 para contar también la nota 4.
+CES_NOTA_MINIMA = 5
 
 def alertas_cliente(aps=None, mes=None, ciudad="TODAS", fytd=None):
     """Alertas de clientes insatisfechos (casos graves a atender en 24 h), pendientes primero."""
@@ -842,6 +823,39 @@ def render_kaizen_alertas():
         with st.expander(f"Ver {len(sin_correo)} APS sin correo en el directorio"):
             st.write(", ".join(sin_correo))
 
+    # --- Panel de cobertura y prioridades (solo lectura; no envía nada) ---
+    log_df = cargar_log_envios()
+    ultimo = {}
+    if not log_df.empty and {"aps", "fecha"} <= set(log_df.columns):
+        ultimo = log_df.groupby("aps")["fecha"].max().to_dict()
+    res_kz = {a: resumen_aps(a, fytd, mes, CIUDAD) for a in aps_lista}
+    filas_kz = [{"Asesor": a, "Correo": "✓" if a in con_correo else "—",
+                 "Alertas por atender": res_kz[a]["alertas_pend"], "Alertas vencidas": res_kz[a]["alertas_venc"],
+                 "Contactos vigentes": res_kz[a]["vivas"],
+                 "ISC": res_kz[a]["isc"] if res_kz[a]["enc_tot"] > 0 else np.nan,
+                 "TRE": res_kz[a]["tre"] if res_kz[a]["e_tot"] > 0 else np.nan,
+                 "Último envío": ultimo.get(a, "—")} for a in aps_lista]
+    df_kz = pd.DataFrame(filas_kz).sort_values(["Alertas por atender", "Contactos vigentes"], ascending=False).reset_index(drop=True)
+    obj_isc_kz = get_obj(D["objetivos"], fytd, "obj_isc"); obj_tre_kz = get_obj(D["objetivos"], fytd, "obj_tre")
+    with st.container(key="card_kz_cobertura"):
+        st.markdown("<div class='card-titulo'>Cobertura y prioridades</div>", unsafe_allow_html=True)
+        n_alerta_aps = int((df_kz["Alertas por atender"] > 0).sum())
+        if n_alerta_aps:
+            st.markdown(f"<div class='banner-alerta'>{n_alerta_aps} asesor(es) tienen alertas de clientes por atender: su correo saldrá con <b>[ALERTA]</b> en el asunto.</div>", unsafe_allow_html=True)
+        def _pinta(v, obj):
+            return "" if pd.isna(v) else ("color:#2E7D32;font-weight:700" if v >= obj else ("color:#F57F17;font-weight:700" if v >= obj - 0.03 else "color:#C62828;font-weight:700"))
+        st_kz = (df_kz.style.format({"ISC": "{:.1%}", "TRE": "{:.1%}"}, na_rep="—")
+                 .map(lambda v: "background:#FFEBEE;color:#C62828;font-weight:700" if v and v > 0 else "", subset=["Alertas por atender"])
+                 .map(lambda v: _pinta(v, obj_isc_kz), subset=["ISC"]).map(lambda v: _pinta(v, obj_tre_kz), subset=["TRE"])
+                 .map(lambda v: "color:#C62828;font-weight:700" if v == "—" else "", subset=["Correo"]))
+        st.dataframe(st_kz, hide_index=True, width="stretch")
+        st.caption(f"ISC y TRE de {mes} (colores contra la meta). \"Último envío\" sale del registro de envíos.")
+        con_alerta = [a for a in con_correo if res_kz[a]["alertas_pend"] > 0]
+        b1, b2, _b3 = st.columns([1.3, 1, 2])
+        b1.button(f"Solo con alertas por atender ({len(con_alerta)})", key="kz_b_al", disabled=not con_alerta,
+                  on_click=lambda: st.session_state.__setitem__("kz_sel", con_alerta))
+        b2.button("Seleccionar todos", key="kz_b_all", on_click=lambda: st.session_state.__setitem__("kz_sel", con_correo))
+
     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
     seleccion = st.multiselect("Asesores a notificar:", con_correo, default=con_correo, key="kz_sel")
 
@@ -945,11 +959,10 @@ if sec != "caratula":
             st.markdown("<div style='padding:8px 16px;font-size:11px;color:#666;letter-spacing:1px;font-weight:700'>MEDICIÓN</div>", unsafe_allow_html=True)
             if st.button("GENERAL",         key="nav_gen"):  st.session_state.seccion="general"
             if st.button("ATRIBUTOS",       key="nav_atr"):  st.session_state.seccion="atributos"
-            if st.button("RADIAL",          key="nav_rad"):  st.session_state.seccion="radial"
             if st.button("VERBALIZACIONES", key="nav_ver"):  st.session_state.seccion="verbalizaciones"
-            if st.button("TENDENCIA ISC",   key="nav_ten"):  st.session_state.seccion="tendencia"
             st.markdown("<hr>", unsafe_allow_html=True)
             st.markdown("<div style='padding:8px 16px;font-size:11px;color:#666;letter-spacing:1px;font-weight:700'>OPERATIVO</div>", unsafe_allow_html=True)
+            if st.button("EMBUDO DE ENVÍO", key="nav_emb"): st.session_state.seccion="embudo"
             if st.button("ALERTAS 24 H",  key="nav_alr"):  st.session_state.seccion="alertas"
             if st.button("PENDIENTES",    key="nav_pen"):  st.session_state.seccion="pendientes"
             st.markdown("<hr>", unsafe_allow_html=True)
@@ -959,6 +972,18 @@ if sec != "caratula":
                 st.markdown("<hr>", unsafe_allow_html=True)
                 st.markdown("<div style='padding:8px 16px;font-size:11px;color:#666;letter-spacing:1px;font-weight:700'>KAIZEN</div>", unsafe_allow_html=True)
                 if st.button("ALERTAS POR CORREO", key="nav_kz"): st.session_state.seccion="kaizen_alertas"
+                with st.expander("Diagnóstico"):
+                    _mb = {k: v.memory_usage(deep=True).sum() / 1e6 for k, v in D.items() if hasattr(v, "memory_usage") and not v.empty}
+                    st.caption(f"Datos en memoria: {sum(_mb.values()):.1f} MB")
+                    st.caption(" · ".join(f"{k} {v:.1f}" for k, v in sorted(_mb.items(), key=lambda x: -x[1])[:6]))
+                    if "t_carga" in st.session_state: st.caption(f"Última descarga desde GCS: {st.session_state['t_carga']:.1f} s")
+                    try:
+                        import psutil; st.caption(f"Memoria del proceso: {psutil.Process().memory_info().rss / 1e6:.0f} MB")
+                    except Exception:
+                        try:
+                            _rss = [l for l in open("/proc/self/status") if l.startswith("VmRSS")][0].split()[1]
+                            st.caption(f"Memoria del proceso: {int(_rss) / 1e3:.0f} MB")
+                        except Exception: pass
             st.markdown("<hr>", unsafe_allow_html=True)
             # Solo los perfiles General y Kaizen pueden recargar los datos.
             # Se limpia únicamente la caché de cargar_datos (no la de imágenes ni gráficos).
@@ -1028,30 +1053,124 @@ def cached_jpg_gen(df, t_type, obj_t, obj_i):
             st_ap = df.style.apply(sty_a, axis=1).format({"TRE %":"{:.1%}","% ISC":"{:.1%}"}).set_table_attributes('class="tabla-voc"').hide(axis="index")
         return styler_to_jpg_buf(st_ap).getvalue()
 
+# ==============================================================================
+# SECCIÓN 1: GENERAL (incluye la tendencia del ISC)
+# ==============================================================================
+def _sin_dealer(df):
+    if df.empty or "dealer" not in df.columns: return df
+    return df[~df["dealer"].astype(str).str.upper().str.contains("SIN DEALER", na=False)]
+
+def kpis_periodo(meses, fytd, ciudad):
+    """Totales de la ciudad (todos los dealers) para una lista de meses: enviadas, respondidas, TRE e ISC."""
+    im = _sin_dealer(filtrar(D["isc_mensual"], fytd=fytd, ciudad=ciudad))
+    tm = _sin_dealer(filtrar(D["tre_mensual"], fytd=fytd, ciudad=ciudad))
+    im = im[im["mes_anio"].isin(meses)] if not im.empty else im
+    tm = tm[tm["mes_anio"].isin(meses)] if not tm.empty else tm
+    enc = im["total_encuestas"].sum() if not im.empty else 0
+    i16 = im["I16"].sum() if not im.empty else 0; i78 = im["I78"].sum() if not im.empty else 0
+    E = tm["E"].sum() if not tm.empty else 0; Cc = tm["C"].sum() if not tm.empty else 0
+    return {"E": E, "C": Cc, "enc": enc,
+            "tre": Cc / E if E > 0 else np.nan,
+            "isc": (enc - 2 * i16 - i78) / enc if enc > 0 else np.nan}
+
+def datos_tendencia(fytd, ciudad, dealer, acumulado):
+    """Series mensuales (o acumuladas) de ISC: promedio + una serie por dealer (o por asesor si hay dealer)."""
+    if dealer != "GENERAL":
+        df_base = filtrar(D["isc_aps"], fytd=fytd, ciudad=ciudad, dealer=dealer)
+        df_prom = filtrar(D["isc_mensual"], fytd=fytd, ciudad=ciudad, dealer=dealer)
+        clave = "aps_nombre"
+    else:
+        df_base = _sin_dealer(filtrar(D["isc_mensual"], fytd=fytd, ciudad=ciudad)); df_prom = df_base; clave = "dealer"
+    if df_base.empty: return None
+    orden = dict(zip(df_base["mes_anio"], df_base["orden_mes"]))
+    meses = sorted(orden, key=orden.get); ords = [orden[m] for m in meses]
+
+    def serie(sub, acum):
+        g = sub.groupby("orden_mes")[["total_encuestas", "I16", "I78"]].sum().reindex(ords).fillna(0)
+        n_mes = g["total_encuestas"].tolist()
+        if acum: g = g.cumsum()
+        n = g["total_encuestas"]
+        isc = ((n - 2 * g["I16"] - g["I78"]) / n.where(n > 0)).tolist()
+        return isc, n_mes
+
+    prom, n_prom = serie(df_prom, acumulado)
+    series = {}
+    for nombre in sorted(x for x in df_base[clave].unique() if str(x).strip().upper() != "SIN DEALER"):
+        series[nombre] = serie(df_base[df_base[clave] == nombre], acumulado)
+    return {"meses": meses, "prom": prom, "n_prom": n_prom, "series": series, "por": clave}
+
+def fig_tendencia_isc(d, obj_isc, titulo_prom, resaltar=None):
+    """Línea del ISC con meta, barras de encuestas y una serie por dealer/asesor (interactiva)."""
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    meses = d["meses"]
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    if resaltar in meses:
+        i = meses.index(resaltar)
+        fig.add_vrect(x0=i - 0.5, x1=i + 0.5, fillcolor=C["amarillo"], opacity=0.16, line_width=0, layer="below")
+    fig.add_trace(go.Bar(x=meses, y=d["n_prom"], name="Encuestas", marker_color="#DDE1EA", opacity=0.9,
+                         hovertemplate="%{y} encuestas<extra></extra>"), secondary_y=True)
+    colores_dealer = {"Centro Nacional de Servicio": "#1976D2", "El Alto": "#D32F2F", "Express": "#388E3C"}
+    muchas = len(d["series"]) > 6
+    for k, (nombre, (vals, ns)) in enumerate(d["series"].items()):
+        color = colores_dealer.get(nombre, COLORWAY[k % len(COLORWAY)])
+        fig.add_trace(go.Scatter(x=meses, y=vals, mode="lines+markers", name=nombre, customdata=ns,
+                                 line=dict(color=color, width=2), marker=dict(size=6),
+                                 visible="legendonly" if muchas else True,
+                                 hovertemplate=nombre + ": %{y:.1%} (%{customdata} enc. del mes)<extra></extra>"),
+                      secondary_y=False)
+    fig.add_trace(go.Scatter(x=meses, y=d["prom"], mode="lines+markers+text", name=titulo_prom,
+                             line=dict(color=C["navy"], width=4), marker=dict(size=10, color=C["amarillo"], line=dict(color=C["navy"], width=2)),
+                             text=[("" if v != v else f"{v:.1%}") for v in d["prom"]], textposition="top center",
+                             textfont=dict(size=12, color=C["navy"]),
+                             hovertemplate=titulo_prom + ": %{y:.1%}<extra></extra>"), secondary_y=False)
+    fig.add_hline(y=obj_isc, line_dash="dash", line_color=C["naranja"], secondary_y=False,
+                  annotation_text=f"Meta {obj_isc:.0%}", annotation_position="top left", annotation_font_color=C["naranja"])
+    vals = [v for v in d["prom"] if v == v] + [v for _, (vs, _) in d["series"].items() for v in vs if v == v] + [obj_isc]
+    lo = max(0.0, min(vals) - 0.06); hi = min(1.03, max(vals) + 0.06)
+    fig.update_yaxes(tickformat=".0%", range=[lo, hi], secondary_y=False)
+    fig.update_yaxes(showgrid=False, range=[0, max(max(d["n_prom"]), 1) * 4], showticklabels=False, secondary_y=True)
+    plotly_layout(fig, alto=420)
+    fig.update_layout(hovermode="x unified", bargap=0.45)
+    return fig
+
+def fig_ranking_aps(df_ap, obj_isc, resaltar=None):
+    """Barras horizontales: ISC por asesor contra la meta (color por cumplimiento)."""
+    import plotly.graph_objects as go
+    d = df_ap[df_ap["enc"] > 0].sort_values("prom_isc")
+    if d.empty: return None
+    cols = [C["ok"] if v >= obj_isc else (C["alerta"] if v >= obj_isc - 0.03 else C["mal"]) for v in d["prom_isc"]]
+    es_yo = [(n == resaltar) for n in d["aps_nombre"]] if resaltar else [True] * len(d)
+    fig = go.Figure(go.Bar(x=d["prom_isc"], y=d["aps_nombre"], orientation="h",
+                           marker=dict(color=cols, opacity=[1.0 if y else 0.4 for y in es_yo],
+                                       line=dict(color=C["navy"], width=[3 if (resaltar and y) else 0 for y in es_yo])),
+                           text=[f"{v:.0%} · n={int(n)}" for v, n in zip(d["prom_isc"], d["enc"])], textposition="outside",
+                           customdata=d[["enc", "E", "C"]].values,
+                           hovertemplate="<b>%{y}</b><br>ISC %{x:.1%}<br>%{customdata[0]:.0f} respondidas<br>TRE: %{customdata[2]:.0f} de %{customdata[1]:.0f} enviadas<extra></extra>"))
+    fig.add_vline(x=obj_isc, line_dash="dash", line_color=C["naranja"], annotation_text=f"Meta {obj_isc:.0%}", annotation_position="top")
+    plotly_layout(fig, alto=max(240, 34 * len(d) + 70), leyenda_abajo=False)
+    fig.update_xaxes(tickformat=".0%", range=[0, 1.22], showgrid=True, gridcolor=C["linea"])
+    fig.update_yaxes(showgrid=False)
+    return fig
+
 def render_general():
     st.markdown("<div class='seccion-titulo'>Medición General — TRE & ISC</div>",unsafe_allow_html=True)
     
-    col1,col2,col3,col4,col5 = st.columns([2,2,2,1,1])
+    col1,col2,col3,col4 = st.columns([2,2,2,1.6])
     with col1: fytd_sel=st.selectbox("Periodo:",todos_fytd,key="g_fytd")
     with col2:
         mm=meses_de(D["isc_mensual"],fytd_sel,CIUDAD)
-        mes_sel=st.selectbox("Mes/Año:",["TODOS"]+mm,key="g_mes")
+        mes_sel=st.selectbox("Mes/Año:",["TODOS"]+mm,index=len(mm),key="g_mes")   # por defecto: el último mes
     with col3:
         dlrs=dealers_para_ciudad(CIUDAD)
         dealer_sel=st.selectbox("Dealer:",dlrs,key="g_dlr")
-    
-    if "gen_acum" not in st.session_state: st.session_state.gen_acum = False
     with col4:
-        st.markdown("<div style='margin-top:28px'></div>",unsafe_allow_html=True)
-        if st.button("Cargar",key="g_btn",width="stretch",type="primary"):
-            st.session_state.gen_acum = False; st.rerun()
-    with col5:
-        st.markdown("<div style='margin-top:28px'></div>",unsafe_allow_html=True)
-        if st.button("ACUM",key="g_btn_acum",width="stretch"):
-            st.session_state.gen_acum = True; st.rerun()
+        st.markdown("<div style='margin-top:30px'></div>",unsafe_allow_html=True)
+        acum_sel = st.toggle("Acumulado hasta el mes", key="g_acum")
+    st.session_state.gen_acum = acum_sel
 
     if mes_sel == "TODOS": meses_a_procesar = mm
-    elif st.session_state.gen_acum:
+    elif acum_sel:
         if mes_sel in mm: meses_a_procesar = mm[:mm.index(mes_sel)+1]
         else: meses_a_procesar = []
     else: meses_a_procesar = [mes_sel]
@@ -1084,20 +1203,57 @@ def render_general():
          "prom_isc":(c_tot-i16t*2-i78t)/c_tot if c_tot>0 else 0}
     df_show=pd.concat([df_d,pd.DataFrame([tot])],ignore_index=True)
 
-    str_acum = " (ACUM)" if st.session_state.gen_acum and mes_sel != "TODOS" else ""
+    str_acum = " (ACUM)" if acum_sel and mes_sel != "TODOS" else ""
 
-    ks=st.columns(3)
-    for i,(lbl,val,fmt,sub) in enumerate([
-        ("Total Enviadas",tot["E"],"{:.0f}",f"FYTD {fytd_sel.replace('FYTD ','')} {str_acum}"),
-        ("TRE %",tot["prom_tre"],"{:.1%}",f"Obj {obj_tre:.0%}"),
-        ("ISC %",tot["prom_isc"],"{:.1%}",f"Obj {obj_isc:.0%}"),
-    ]): ks[i].markdown(kpi_html(lbl,val,fmt,sub),unsafe_allow_html=True)
-    st.markdown("<div style='height:16px'></div>",unsafe_allow_html=True)
+    # --- Aviso de alertas pendientes (casos graves a atender en 24 h) ---
+    _al_pend = alertas_cliente(None, None, CIUDAD, fytd_sel)
+    _n_al = int((_al_pend["estado"] == "Pendiente").sum()) if not _al_pend.empty else 0
+    if _n_al:
+        st.markdown(f"<div class='banner-alerta'>{_n_al} alerta(s) de clientes insatisfechos por atender — "
+                    f"revisa la sección <b>ALERTAS 24 H</b>.</div>", unsafe_allow_html=True)
+
+    # --- KPIs con variación contra el periodo anterior ---
+    prev = None; ref_txt = ""
+    if mes_sel != "TODOS":
+        if acum_sel and len(meses_a_procesar) > 1:
+            prev = kpis_periodo(meses_a_procesar[:-1], fytd_sel, CIUDAD); ref_txt = f"vs acum. a {meses_a_procesar[-2]}"
+        elif not acum_sel and mm.index(mes_sel) > 0:
+            _mp = mm[mm.index(mes_sel) - 1]
+            prev = kpis_periodo([_mp], fytd_sel, CIUDAD); ref_txt = f"vs {_mp}"
+    def _dpp(k):   # variación en puntos porcentuales
+        return None if prev is None or prev[k] != prev[k] else (tot["prom_" + k] - prev[k]) * 100
+    ks = st.columns(4)
+    tarjetas = [
+        kpi_card("Encuestas enviadas", f"{tot['E']:,.0f}", f"FYTD {fytd_sel.replace('FYTD ','')}{str_acum}",
+                 delta_chip(None if prev is None else tot["E"] - prev["E"], "abs", ref_txt)),
+        kpi_card("Respondidas", f"{tot['C']:,.0f}", f"{tot['enc']:,.0f} con ISC",
+                 delta_chip(None if prev is None else tot["C"] - prev["C"], "abs", ref_txt)),
+        kpi_card("TRE", f"{tot['prom_tre']:.1%}", f"Meta {obj_tre:.0%}", delta_chip(_dpp("tre"), "pp", ref_txt),
+                 color=_color_kpi(tot["prom_tre"], obj_tre)),
+        kpi_card("ISC", f"{tot['prom_isc']:.1%}", f"Meta {obj_isc:.0%}", delta_chip(_dpp("isc"), "pp", ref_txt),
+                 color=_color_kpi(tot["prom_isc"], obj_isc)),
+    ]
+    for col_k, html_k in zip(ks, tarjetas): col_k.markdown(html_k, unsafe_allow_html=True)
+    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+
+    # --- Tendencia del ISC (antes era una sección aparte) ---
+    with st.container(key="card_tendencia"):
+        tc1, tc2 = st.columns([3, 1.6])
+        tc1.markdown(f"<div class='card-titulo'>Tendencia del ISC — {fytd_sel} · {CIUDAD}"
+                     f"{'' if dealer_sel == 'GENERAL' else ' · ' + dealer_sel}</div>", unsafe_allow_html=True)
+        modo_t = tc2.radio("Serie", ["Mensual", "Acumulada"], horizontal=True, key="g_trend_modo", label_visibility="collapsed")
+        dt = datos_tendencia(fytd_sel, CIUDAD, dealer_sel, modo_t == "Acumulada")
+        if dt is None:
+            st.info("Sin datos para la tendencia.")
+        else:
+            lbl_prom = "Promedio general" if dealer_sel == "GENERAL" else f"Promedio {dealer_sel}"
+            mostrar_plotly(fig_tendencia_isc(dt, obj_isc, lbl_prom, resaltar=None if mes_sel == "TODOS" else mes_sel), key="pl_tend")
+            st.caption("Clic en la leyenda para ocultar o mostrar series. Las barras son las encuestas respondidas del mes."
+                       + (" Líneas por asesor." if dealer_sel != "GENERAL" else " Líneas por dealer."))
 
     cl,cr=st.columns([1,1.4])
-    with cl:
-        st.markdown("<div class='chart-box'>",unsafe_allow_html=True)
-        st.markdown(f"**DEALER{str_acum}**")
+    with cl, st.container(key="card_dealer"):
+        st.markdown(f"<div class='card-titulo'>Dealer{str_acum}</div>", unsafe_allow_html=True)
         ds=df_show[["dealer","E","C","F","prom_tre","i16","i78","prom_isc"]].copy()
         ds.columns=["Nombre","Env.","Comp.","Falta","TRE %","1-6","7-8","%ISC"]
         
@@ -1118,11 +1274,9 @@ def render_general():
         st.markdown(tabla_html(st2),unsafe_allow_html=True)
         
         boton_descarga_tabla(st, "Tabla General", ds, lambda: cached_jpg_gen(ds, 'gral', obj_tre, obj_isc), "Tabla_General", "dl_gd")
-        st.markdown("</div>",unsafe_allow_html=True)
 
-    with cr:
-        st.markdown("<div class='chart-box'>",unsafe_allow_html=True)
-        st.markdown(f"**Detalle por APS — {dealer_sel} · {CIUDAD}{str_acum}**")
+    with cr, st.container(key="card_aps"):
+        st.markdown(f"<div class='card-titulo'>Detalle por APS — {dealer_sel} · {CIUDAD}{str_acum}</div>", unsafe_allow_html=True)
         
         if not df_ia.empty and not df_ta.empty:
             agg_ti = df_ta.groupby("aps_nombre").agg(E=("E","sum"), C=("C","sum")).reset_index()
@@ -1131,6 +1285,9 @@ def render_general():
             df_ap["prom_tre"] = np.where(df_ap["E"]>0, df_ap["C"]/df_ap["E"], 0)
             df_ap["prom_isc"] = np.where(df_ap["enc"]>0, (df_ap["enc"]-df_ap["i16"]*2-df_ap["i78"])/df_ap["enc"], 0)
             
+            _fig_rk = fig_ranking_aps(df_ap, obj_isc)
+            if _fig_rk is not None: mostrar_plotly(_fig_rk, key="pl_rank")
+
             tot_ap = {"aps_nombre":"TOTAL GENERAL", "E":df_ap["E"].sum(), "C":df_ap["C"].sum(), "enc":df_ap["enc"].sum(), "i16":df_ap["i16"].sum(), "i78":df_ap["i78"].sum()}
             tot_ap["prom_tre"] = tot_ap["C"]/tot_ap["E"] if tot_ap["E"]>0 else 0
             tot_ap["prom_isc"] = (tot_ap["enc"] - tot_ap["i16"]*2 - tot_ap["i78"])/tot_ap["enc"] if tot_ap["enc"]>0 else 0
@@ -1169,7 +1326,6 @@ def render_general():
             c_t.download_button("TOP 3", data=cached_jpg_gen(ds_validos.nlargest(3,"% ISC"), 'topbot', obj_tre, obj_isc), file_name="Top3.jpg", mime="image/jpeg", key="dl_top3")
             c_b.download_button("BOTTOM 3", data=cached_jpg_gen(ds_validos.nsmallest(3,"% ISC"), 'topbot', obj_tre, obj_isc), file_name="Bot3.jpg", mime="image/jpeg", key="dl_bot3")
         else: st.info("Sin datos para el filtro.")
-        st.markdown("</div>", unsafe_allow_html=True)
 
     # =========================================================================
     # INDICADORES CIRCULARES (Z, AA, AB)
@@ -1209,8 +1365,24 @@ def render_general():
                 v_mean = row_e[attr_name].mean()
                 val_actual = float(v_mean) if pd.notna(v_mean) else 0.0
 
-        # "Alertas atendidas en 24 Hrs": se calcula del reporte de alertas; si no hay, queda el valor manual
+        # H1 y CES: se calculan del RawData (conteos guardados en isc_mensual); si el mes no los tiene, queda el valor manual
         nota_auto = ""
+        if attr_name in ("Bien a la primera H1", "Customer Expectations CES") and "h1_n" in D["isc_mensual"].columns:
+            _b = aplicar_filtro_ciudad(D["isc_mensual"], CIUDAD)
+            _b = _b[(_b["fytd"].astype(str).str.upper() == fytd_str) & (_b["mes_anio"].isin(meses_a_procesar))]
+            if attr_name == "Bien a la primera H1":
+                _n, _si = _b["h1_n"].sum(), _b["h1_si"].sum()
+                if _n > 0:
+                    val_actual = float(_si / _n)
+                    nota_auto = f"Calculado del RawData (VOC06): {int(_si)} de {int(_n)} respondieron Sí"
+            else:
+                _col_c = "ces_c5" if CES_NOTA_MINIMA >= 5 else "ces_c4"
+                _n, _si = _b["ces_n"].sum(), _b[_col_c].sum()
+                if _n > 0:
+                    val_actual = float(_si / _n)
+                    nota_auto = f"Calculado del RawData (VOC09 ≥ {CES_NOTA_MINIMA}): {int(_si)} de {int(_n)}"
+
+        # "Alertas atendidas en 24 Hrs": se calcula del reporte de alertas; si no hay, queda el valor manual
         if attr_name == "Alertas atendidas en 24 Hrs" and not D["alertas"].empty:
             _al_e = aplicar_filtro_ciudad(D["alertas"], CIUDAD)
             _al_e = _al_e[(_al_e["fytd"].astype(str).str.upper() == fytd_str) & (_al_e["mes_anio"].isin(meses_a_procesar))]
@@ -1251,160 +1423,6 @@ def render_general():
         if nota_auto: cols_redondos[i].caption(nota_auto)
 
 # ==============================================================================
-# SECCIÓN 2: TENDENCIA ISC 
-# ==============================================================================
-
-@st.cache_data(show_spinner=False, max_entries=20)
-def cached_plot_tendencia(meses_ord, totales, prom_vals, series_sec, colores_sec, markers_sec, obj_isc, lbl_prom, titulo, lbl_enc):
-    margen_bottom = min(0.45, 0.18 + (1 + len(series_sec) + 1) * 0.045)
-    fig, ax1 = plt.subplots(figsize=(14, 7), facecolor="white")
-    plt.subplots_adjust(bottom=margen_bottom)
-    ax2 = ax1.twinx()
-    x_idx = np.arange(len(meses_ord))
-
-    ax1.bar(x_idx, totales, color=COLOR_BARRAS, width=0.6, zorder=2)
-    ax1.set_xticks([])
-    ax1.set_ylabel("Cant. Encuestas", color=COLOR_BARRAS, fontsize=10, fontweight="bold")
-    ax1.tick_params(axis="y", colors=COLOR_BARRAS)
-    ax1.spines["top"].set_visible(False)
-
-    valid_idx = [i for i,v in enumerate(prom_vals) if v is not None and not np.isnan(v)]
-    valid_val = [prom_vals[i] for i in valid_idx]
-    
-    if len(valid_idx) >= 4:
-        spline_x = np.linspace(min(valid_idx), max(valid_idx), 300)
-        spline_y = make_interp_spline(valid_idx, valid_val, k=3)(spline_x)
-        ax2.plot(spline_x, spline_y, color=COLOR_LINEA, linewidth=3, zorder=4)
-    elif valid_idx:
-        ax2.plot(x_idx, prom_vals, color=COLOR_LINEA, linewidth=3, zorder=4)
-
-    ax2.scatter(x_idx, prom_vals, color=COLOR_LINEA, s=120, edgecolors="black", linewidths=1.2, zorder=6, label=lbl_prom)
-    
-    efecto = [path_effects.withStroke(linewidth=2.5, foreground="white", alpha=0.9)]
-    
-    for j, v in enumerate(prom_vals):
-        if v is not None and not np.isnan(v):
-            ax2.text(j, v + 0.030, f"{v:.1%}", ha='center', fontsize=11, fontweight='900', color="#1A1A1A", path_effects=efecto, zorder=7)
-
-    for nombre, pts in series_sec.items():
-        ax2.scatter(x_idx, pts, color=colores_sec[nombre], marker=markers_sec[nombre], s=70, alpha=0.9, edgecolors="white", zorder=5, label=f"{nombre} (●)")
-        for j, v in enumerate(pts):
-            if v is not None and not np.isnan(v):
-                ax2.text(j, v - 0.030, f"{v:.1%}", ha='center', fontsize=8.5, fontweight='bold', color=colores_sec[nombre], path_effects=efecto, zorder=6)
-
-    ax2.axhline(obj_isc, color=COLOR_OBJETIVO, linewidth=1.5, linestyle="--", alpha=0.7, label=f"Objetivo ({obj_isc:.0%})")
-
-    ax2.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
-    all_vals = [v for pts in list(series_sec.values()) + [prom_vals] for v in pts if v is not None and not np.isnan(v)]
-    min_y = max(0.4, min(all_vals + [obj_isc]) - 0.08) if all_vals else 0.4
-    ax2.set_ylim(min_y, 1.12)
-    ax2.tick_params(axis="y", colors="#333")
-    ax2.set_ylabel("% ISC", color="#333", fontsize=10, fontweight="bold")
-    ax2.spines["top"].set_visible(False)
-    ax2.set_title(titulo, fontsize=13, fontweight="bold", pad=18, color="#1A1A1A")
-    ax2.legend(loc="upper right", fontsize=8, frameon=True, facecolor="white", edgecolor="#CCC", framealpha=0.9)
-
-    row_labels = [lbl_enc]; row_colors = [COLOR_BARRAS]; cell_data = [[f"{v:.0f}" for v in totales]]
-    for nombre, pts in series_sec.items():
-        row_labels.append(f"{nombre if len(nombre) <= 22 else nombre[:20]+'…'} (●)")
-        row_colors.append(colores_sec[nombre])
-        cell_data.append([f"{v:.1%}" if v is not None and not np.isnan(v) else "—" for v in pts])
-    
-    row_labels.append(lbl_prom); row_colors.append(COLOR_LINEA)
-    cell_data.append([f"{v:.1%}" if v is not None and not np.isnan(v) else "—" for v in prom_vals])
-
-    tbl = plt.table(cellText=cell_data, rowLabels=row_labels, colLabels=meses_ord, loc="bottom", cellLoc="center", rowColours=row_colors)
-    for (r, c), cell in tbl.get_celld().items():
-        if c == -1 and r > 0:
-            cell.get_text().set_color("white"); cell.get_text().set_weight("bold"); cell.get_text().set_fontsize(7.5)
-        if r == 0:
-            cell.set_facecolor("#2C2C2C"); cell.get_text().set_color("white"); cell.get_text().set_weight("bold"); cell.get_text().set_fontsize(7.5)
-        elif c != -1:
-            cell.set_facecolor("#F4F4F4"); cell.get_text().set_color("#1A1A1A"); cell.get_text().set_fontsize(7.5)
-    tbl.auto_set_font_size(False); tbl.scale(1, 1.6)
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="jpeg", facecolor="white", bbox_inches="tight", dpi=150)
-    plt.close(fig)
-    buf.seek(0)
-    return buf.getvalue()
-
-def render_tendencia():
-    st.markdown("<div class='seccion-titulo'>Tendencia Histórica ISC</div>",unsafe_allow_html=True)
-
-    PALETA_APS = ["#E91E63","#9C27B0","#3F51B5","#00BCD4","#4CAF50","#FF9800","#795548","#607D8B","#F44336","#009688","#CDDC39","#FF5722"]
-
-    c1,c2,c3,c4 = st.columns([2,2,1,1])
-    with c1: fytd_sel  = st.selectbox("Rango Graf:", todos_fytd, key="t_fytd")
-    with c2: dealer_sel = st.selectbox("Filtro Dealer:", dealers_para_ciudad(CIUDAD), key="t_dlr")
-    with c3:
-        st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
-        btn_gen  = st.button("Generar", key="t_btn",  width="stretch", type="primary")
-    with c4:
-        st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
-        btn_acum = st.button("ACUM",    key="t_acum", width="stretch")
-
-    if "tend_params" not in st.session_state: st.session_state.tend_params = {}
-    if btn_gen or btn_acum: st.session_state.tend_params = {"fytd": fytd_sel, "dealer": dealer_sel, "acum": btn_acum, "ciudad": CIUDAD}
-    elif st.session_state.tend_params.get("ciudad") != CIUDAD: st.session_state.tend_params = {}
-
-    p = st.session_state.tend_params
-    if not p: st.info("Selecciona los parámetros y presiona **Generar**."); return
-
-    fytd = p["fytd"]; dealer = p["dealer"]; acum = p.get("acum", False); ciudad_p = p.get("ciudad", CIUDAD)
-    modo_dealer = (dealer != "GENERAL")
-
-    if modo_dealer:
-        df_base = filtrar(D["isc_aps"], fytd=fytd, ciudad=ciudad_p, dealer=dealer)
-        df_prom = filtrar(D["isc_mensual"], fytd=fytd, ciudad=ciudad_p, dealer=dealer)
-    else:
-        df_base = filtrar(D["isc_mensual"], fytd=fytd, ciudad=ciudad_p)
-        df_prom = df_base
-
-    if df_base.empty: st.warning("Sin datos para la selección."); return
-
-    meses_ord = (df_base.drop_duplicates("mes_anio").sort_values("orden_mes")["mes_anio"].tolist())
-    obj_isc = get_obj(D["objetivos"], fytd, "obj_isc")
-
-    def serie(sub_df):
-        pts = []
-        for mes in meses_ord:
-            if mes not in sub_df["mes_anio"].values: pts.append(np.nan); continue
-            if acum: g = sub_df[sub_df["orden_mes"] <= sub_df[sub_df["mes_anio"]==mes]["orden_mes"].values[0]]
-            else: g = sub_df[sub_df["mes_anio"] == mes]
-            c = g["total_encuestas"].sum(); i16 = g["I16"].sum(); i78 = g["I78"].sum()
-            pts.append((c - i16*2 - i78)/c if c > 0 else np.nan)
-        return pts
-
-    def totales_serie(sub_df):
-        return [sub_df[sub_df["mes_anio"]==m]["total_encuestas"].sum() if m in sub_df["mes_anio"].values else 0 for m in meses_ord]
-
-    prom_vals = serie(df_prom); totales = totales_serie(df_prom)
-    series_sec = {}; colores_sec = {}; markers_sec = {}
-
-    if modo_dealer:
-        aps_lista = sorted([a for a in df_base["aps_nombre"].unique() if str(a).strip().upper() != "SIN DEALER"])
-        for i, aps_n in enumerate(aps_lista):
-            series_sec[aps_n] = serie(df_base[df_base["aps_nombre"] == aps_n])
-            colores_sec[aps_n] = PALETA_APS[i % len(PALETA_APS)]; markers_sec[aps_n] = "o"
-        lbl_prom = f"PROM {dealer} (●)"; titulo = f"ISC DEALER: {dealer.upper()} — {fytd}"; lbl_enc = f"Cant. Encuestas {dealer} (■)"
-    else:
-        dealers_lista = sorted([d for d in df_base["dealer"].unique() if d != "SIN DEALER"])
-        for d in dealers_lista:
-            series_sec[d] = serie(df_base[df_base["dealer"] == d])
-            colores_sec[d] = COLORES_DEALERS.get(d, "#607D8B"); markers_sec[d] = MARKERS_DEALERS.get(d, "o")
-        lbl_prom = f"PROM GENERAL (●)"; titulo = f"ISC VoC — {ciudad_p} — {fytd}"; lbl_enc = "Cant. Encuestas (■)"
-
-    if acum: titulo += " (Acumulado)"
-
-    img_bytes = cached_plot_tendencia(meses_ord, totales, prom_vals, series_sec, colores_sec, markers_sec, obj_isc, lbl_prom, titulo, lbl_enc)
-
-    st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
-    st.image(img_bytes, width="stretch")
-    st.download_button("Descargar Gráfica ISC", data=img_bytes, file_name="Tendencia_ISC.jpg", mime="image/jpeg", key="dl_tend")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-# ==============================================================================
 
 # SECCIÓN 3: ATRIBUTOS
 
@@ -1439,163 +1457,229 @@ def cached_jpg_attr_table(df_resumen, cols_eval):
     return styler_to_jpg_buf(styler_res).getvalue()
 
 
-@st.cache_data(show_spinner=False, max_entries=20)
+# ------------------------------------------------------------------------------
+# Vistas de Atributos (Plotly: se dibujan en el navegador)
+# ------------------------------------------------------------------------------
+def _meta_attr(v):
+    return v / 100.0 if pd.notna(v) and v > 2 else v
 
-def cached_hist_plot_attr(datos_hist_tabla, color_map, meses_h, obj_h, atr_hist_sel, dealer_sel, aps_sel):
+def vista_brechas(df_resumen, cols_cache, styler_res):
+    """Mapa de calor atributo x dealer/asesor coloreado por la distancia a la meta + cambio vs periodo anterior."""
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    if df_resumen.empty: st.info("Sin datos."); return
+    val_cols = [c for c in df_resumen.columns if c not in ("Atributo", "Objetivo", "GAP")]
+    main = "GENERAL" if "GENERAL" in val_cols else "%"
+    obj = df_resumen["Objetivo"].fillna(0.85)
+    brecha_main = df_resumen[main] - obj
+    n_bajo = int((brecha_main < 0).sum()); n_tot = int(brecha_main.notna().sum())
 
-    fig_h, ax_h = plt.subplots(figsize=(13, 7.5), facecolor="white")
+    k1, k2, k3 = st.columns(3)
+    peor = brecha_main.idxmin() if brecha_main.notna().any() else None
+    k1.markdown(kpi_card("Atributos bajo la meta", f"{n_bajo} de {n_tot}", "en la selección actual",
+                         color=C["mal"] if n_bajo else C["ok"]), unsafe_allow_html=True)
+    k2.markdown(kpi_card("Mayor brecha", f"{brecha_main[peor] * 100:+.1f} pp" if peor is not None else "—",
+                         df_resumen.loc[peor, "Atributo"] if peor is not None else "", color=C["mal"]), unsafe_allow_html=True)
+    gap = df_resumen["GAP"]
+    caida = gap.idxmin() if gap.notna().any() and gap.min() < 0 else None
+    k3.markdown(kpi_card("Mayor caída vs periodo anterior", f"{gap[caida] * 100:+.1f} pp" if caida is not None else "—",
+                         df_resumen.loc[caida, "Atributo"] if caida is not None else "Sin caídas o sin periodo previo",
+                         color=C["alerta"] if caida is not None else C["ok"]), unsafe_allow_html=True)
+    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
-    x_h = np.arange(len(meses_h))
+    ylabels = [f"{a}  ·  meta {o:.0%}" for a, o in zip(df_resumen["Atributo"], obj)]
+    z = df_resumen[val_cols].sub(obj, axis=0)
+    txt = df_resumen[val_cols].map(lambda v: "" if pd.isna(v) else f"{v:.0%}")
+    hay_gap = gap.notna().any()
+    fig = make_subplots(rows=1, cols=2 if hay_gap else 1, shared_yaxes=True, horizontal_spacing=0.02,
+                        column_widths=[0.78, 0.22] if hay_gap else [1.0])
+    fig.add_trace(go.Heatmap(z=z.values, x=val_cols, y=ylabels, text=txt.values, texttemplate="%{text}", showscale=False,
+                             colorscale=[[0, "#D32F2F"], [0.5, "#FFFFFF"], [1, "#388E3C"]], zmin=-0.15, zmax=0.15, xgap=2, ygap=2,
+                             hovertemplate="<b>%{y}</b><br>%{x}: %{text}<br>Distancia a la meta: %{z:+.1%}<extra></extra>"), row=1, col=1)
+    if hay_gap:
+        cols_g = [C["ok"] if (v == v and v >= 0) else C["mal"] for v in gap]
+        fig.add_trace(go.Bar(x=(gap * 100), y=ylabels, orientation="h", marker_color=cols_g,
+                             text=[("" if v != v else f"{v * 100:+.1f}") for v in gap], textposition="outside",
+                             hovertemplate="<b>%{y}</b><br>%{x:+.1f} pp<extra></extra>"), row=1, col=2)
+        fig.update_xaxes(zeroline=True, zerolinecolor=C["gris"], showgrid=False, showticklabels=False, row=1, col=2)
+    plotly_layout(fig, alto=max(380, 30 * len(df_resumen) + 120), leyenda_abajo=False)
+    fig.update_yaxes(autorange="reversed", showgrid=False)
+    fig.update_xaxes(side="top", row=1, col=1)
+    fig.update_layout(showlegend=False, margin=dict(l=10, r=30, t=40, b=10))
+    mostrar_plotly(fig, key="pl_brechas")
+    st.caption("Izquierda: desempeño por columna, coloreado por su distancia a la meta (verde = sobre la meta, rojo = bajo la meta, intensidad = distancia). "
+               "Derecha: cambio contra el periodo anterior en puntos porcentuales. Atributos ordenados del peor al mejor desempeño general.")
 
-    efecto = [path_effects.withStroke(linewidth=2.5, foreground="white", alpha=0.9)]
+    with st.expander("Tabla detallada y descarga"):
+        st.markdown(tabla_html(styler_res), unsafe_allow_html=True)
+        boton_descarga_tabla(st, "📥 Descargar Tabla", df_resumen, lambda: cached_jpg_attr_table(df_resumen, cols_cache), "Atributos", "dl_attr")
 
-    for nombre, y_vals in datos_hist_tabla.items():
+def vista_evolucion(fytd_sel, dealer_sel, aps_sel, score_col, obj_col):
+    """Evolución mensual de un atributo (total + dealers o asesores) contra su meta."""
+    import plotly.graph_objects as go
+    df_h_base = aplicar_filtro_ciudad(D["atributos"], CIUDAD)
+    df_h_base = df_h_base[df_h_base["fytd"] == fytd_sel]
+    df_h_aps = aplicar_filtro_ciudad(D["atrib_aps"], CIUDAD)
+    if not df_h_aps.empty: df_h_aps = df_h_aps[df_h_aps["fytd"] == fytd_sel]
+    lista = sorted([a for a in df_h_base["atributo"].unique() if "bien a la primera h1" not in a.lower()])
+    if not lista: st.info("Sin atributos."); return
+    atr = st.selectbox("Atributo:", lista, key="h_atr_sel")
+    meses_h = meses_de(D["atributos"], fytd_sel, CIUDAD)
+    df_b = df_h_base[df_h_base["atributo"] == atr]
+    df_a = df_h_aps[df_h_aps["atributo"] == atr] if not df_h_aps.empty else pd.DataFrame()
 
-        if nombre == "TOTAL GENERAL" or nombre.startswith("TOTAL "):
+    def tendencia(df_sub):
+        vals = []
+        for m in meses_h:
+            g = df_sub[df_sub["mes_anio"] == m] if not df_sub.empty else df_sub
+            if g.empty: vals.append(np.nan)
+            elif "n_respuestas" in g.columns and g["n_respuestas"].sum() > 0:
+                vals.append((g[score_col] * g["n_respuestas"]).sum() / g["n_respuestas"].sum())
+            else: vals.append(g[score_col].mean())
+        return vals
 
-            c = color_map.get(nombre, "#000000") 
+    series = {}; grueso = None
+    if dealer_sel == "GENERAL":
+        grueso = "TOTAL GENERAL"; series[grueso] = tendencia(df_b)
+        for d in sorted(df_b["dealer"].unique()):
+            if d != "SIN DEALER": series[d] = tendencia(df_b[df_b["dealer"] == d])
+    elif aps_sel == "TODOS":
+        grueso = f"TOTAL {dealer_sel}"; series[grueso] = tendencia(df_b[df_b["dealer"] == dealer_sel])
+        if not df_a.empty:
+            for a in sorted(df_a[df_a["dealer"] == dealer_sel]["aps_nombre"].unique()):
+                if "SIN ASESOR" not in str(a).upper():
+                    series[a] = tendencia(df_a[(df_a["dealer"] == dealer_sel) & (df_a["aps_nombre"] == a)])
+    else:
+        series[aps_sel] = tendencia(df_a[(df_a["dealer"] == dealer_sel) & (df_a["aps_nombre"] == aps_sel)] if not df_a.empty else df_a)
+    obj_raw = df_b[obj_col].iloc[0] if not df_b.empty else 0.85
+    obj_h = _meta_attr(obj_raw)
 
-            ax_h.plot(x_h, y_vals, color=c, linewidth=4, marker='D', markersize=8, zorder=6)
+    fig = go.Figure()
+    for k, (nombre, vals) in enumerate(series.items()):
+        es_total = nombre == grueso
+        fig.add_trace(go.Scatter(x=meses_h, y=vals, mode="lines+markers+text" if es_total else "lines+markers", name=nombre,
+                                 line=dict(color=C["navy"] if es_total else COLORWAY[k % len(COLORWAY)], width=4 if es_total else 2),
+                                 text=[("" if v != v else f"{v:.0%}") for v in vals] if es_total else None, textposition="top center",
+                                 hovertemplate=nombre + ": %{y:.1%}<extra></extra>"))
+    fig.add_hline(y=obj_h, line_dash="dash", line_color=C["naranja"], annotation_text=f"Meta {obj_h:.0%}", annotation_position="top left")
+    todos = [v for vs in series.values() for v in vs if v == v] + [obj_h]
+    plotly_layout(fig, alto=430)
+    fig.update_layout(hovermode="x unified")
+    fig.update_yaxes(tickformat=".0%", range=[max(0, min(todos) - 0.06), min(1.03, max(todos) + 0.06)])
+    mostrar_plotly(fig, key="pl_evol")
+    tabla = pd.DataFrame(series, index=meses_h).T
+    st.dataframe(tabla.style.format("{:.1%}", na_rep="—"), width="stretch")
 
-            for j, v in enumerate(y_vals):
+def vista_palancas(df_resumen, meses_eval, dealer_sel, aps_sel):
+    """Qué atributos se relacionan más con la satisfacción general y cuáles están bajo la meta (prioridades)."""
+    import plotly.graph_objects as go
+    dr = D["drivers"]
+    if dr.empty:
+        st.info("Aún no hay datos de palancas. Reprocesa los meses en el preprocesador actualizado (genera el archivo 14)."); return
+    dr = aplicar_filtro_ciudad(dr, CIUDAD)
+    dr = _sin_dealer(dr[dr["mes_anio"].isin(meses_eval)])
+    if dealer_sel != "GENERAL": dr = dr[dr["dealer"] == dealer_sel]
+    if dr.empty: st.info("Sin datos de palancas para la selección."); return
+    g = dr.groupby("atributo")[["n", "sx", "sy", "sxx", "syy", "sxy"]].sum()
+    den = np.sqrt((g["n"] * g["sxx"] - g["sx"] ** 2) * (g["n"] * g["syy"] - g["sy"] ** 2))
+    g["r"] = (g["n"] * g["sxy"] - g["sx"] * g["sy"]) / den.where(den > 0)
+    main = "GENERAL" if "GENERAL" in df_resumen.columns else "%"
+    base = df_resumen[["Atributo", main, "Objetivo"]].rename(columns={main: "desempeno", "Objetivo": "meta"}).copy()
+    base["meta"] = base["meta"].fillna(0.85)
+    d = base.merge(g[["n", "r"]], left_on="Atributo", right_index=True, how="inner")
+    d = d[(d["n"] >= 15) & d["r"].notna() & d["desempeno"].notna()].copy()
+    if d.empty: st.info("Muestra insuficiente (menos de 15 respuestas por atributo). Prueba con el modo acumulado."); return
+    d["brecha"] = (d["desempeno"] - d["meta"]) * 100
+    umbral = float(d["r"].mean())
+    d["prioridad"] = np.where((d["brecha"] < 0) & (d["r"] >= umbral), "Prioridad alta",
+                      np.where(d["brecha"] < 0, "Bajo la meta", np.where(d["r"] >= umbral, "Mantener (importante)", "Sobre la meta")))
+    colores = {"Prioridad alta": C["mal"], "Bajo la meta": C["alerta"], "Mantener (importante)": C["ok"], "Sobre la meta": "#9E9E9E"}
 
-                if pd.notna(v): ax_h.text(j, v + 0.035, f"{v:.1%}", ha='center', fontsize=10, fontweight='900', color=c, path_effects=efecto, zorder=7)
+    if aps_sel != "TODOS": st.caption("Las palancas se calculan a nivel dealer (no por asesor individual).")
+    n_resp = int(g["n"].max())
+    if n_resp < 50: st.warning(f"Muestra pequeña ({n_resp} respuestas): las relaciones son orientativas. Usa el modo acumulado para más precisión.")
 
-        else:
+    fig = go.Figure()
+    for nombre, grp in d.groupby("prioridad"):
+        fig.add_trace(go.Scatter(x=grp["brecha"], y=grp["r"], mode="markers+text", name=nombre, text=grp["Atributo"],
+                                 textposition="top center", textfont=dict(size=10), marker=dict(size=13, color=colores[nombre], line=dict(color="white", width=1)),
+                                 customdata=np.c_[grp["desempeno"] * 100, grp["meta"] * 100, grp["n"]],
+                                 hovertemplate="<b>%{text}</b><br>Desempeño %{customdata[0]:.1f}% (meta %{customdata[1]:.0f}%)<br>"
+                                               "Relación con la satisfacción: %{y:.2f}<br>%{customdata[2]:.0f} respuestas<extra></extra>"))
+    fig.add_vline(x=0, line_color=C["gris"], line_width=1)
+    fig.add_hline(y=umbral, line_dash="dot", line_color=C["gris"])
+    x0 = min(d["brecha"].min() - 3, -5); x1 = max(d["brecha"].max() + 3, 5)
+    fig.add_shape(type="rect", x0=x0, x1=0, y0=umbral, y1=d["r"].max() + 0.05, fillcolor=C["mal"], opacity=0.06, line_width=0, layer="below")
+    plotly_layout(fig, alto=520)
+    fig.update_xaxes(title="Distancia a la meta (puntos porcentuales)  ←  bajo la meta  |  sobre la meta  →", range=[x0, x1], showgrid=True, gridcolor=C["linea"])
+    fig.update_yaxes(title="Relación con la satisfacción general (correlación)", range=[max(0, d["r"].min() - 0.08), d["r"].max() + 0.08])
+    mostrar_plotly(fig, key="pl_palancas")
+    st.caption("Zona roja = atributos importantes (alta relación con la nota de satisfacción) y bajo la meta: es donde más conviene actuar. "
+               "La correlación muestra asociación, no prueba causalidad.")
 
-            c = color_map.get(nombre, "#1976D2")
+    top = d[d["prioridad"] == "Prioridad alta"].assign(indice=lambda x: -x["brecha"] * x["r"]).sort_values("indice", ascending=False).head(5)
+    st.markdown("<div class='card-titulo'>Prioridades sugeridas</div>", unsafe_allow_html=True)
+    if top.empty: st.success("Ningún atributo importante está bajo la meta en esta selección.")
+    else:
+        for _, r_ in top.iterrows():
+            st.markdown(f"<div style='background:rgba(211,47,47,0.08);border-left:5px solid #D32F2F;padding:8px 12px;margin-bottom:8px;border-radius:4px'>"
+                        f"<b>{r_['Atributo']}</b> — desempeño {r_['desempeno']:.0%} (meta {r_['meta']:.0%}, {r_['brecha']:+.1f} pp) · relación con la satisfacción {r_['r']:.2f}</div>",
+                        unsafe_allow_html=True)
 
-            if aps_sel != "TODOS" and dealer_sel != "GENERAL":
-
-                ax_h.plot(x_h, y_vals, color=c, linewidth=3, marker='o', markersize=9, zorder=3)
-
-                for j, v in enumerate(y_vals):
-
-                    if pd.notna(v): ax_h.text(j, v + 0.035, f"{v:.1%}", ha='center', fontsize=9.5, fontweight='bold', color=c, path_effects=efecto, zorder=5)
-
-            else:
-
-                ax_h.scatter(x_h, y_vals, color=c, s=90, zorder=4, alpha=0.9, edgecolors="white")
-
-                for j, v in enumerate(y_vals):
-
-                    if pd.notna(v): ax_h.text(j, v - 0.035, f"{v:.1%}", ha='center', fontsize=8, color=c, fontweight='bold', path_effects=efecto, zorder=5)
-
-
-
-    ax_h.axhline(obj_h, color=COLOR_OBJETIVO, linestyle="--", linewidth=2, zorder=1)
-    
-
-    ax_h.set_xticks(x_h)
-
-    ax_h.set_xticklabels([]) 
-
-    ax_h.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
-
-    
-
-    all_vals = []
-
-    for vals in datos_hist_tabla.values(): all_vals.extend([v for v in vals if pd.notna(v)])
-
-    min_y = max(0, min(all_vals + [obj_h]) - 0.15) if all_vals else 0
-
-    ax_h.set_ylim(min_y, 1.15)
-
-    ax_h.set_title(f"Tendencia FYTD: {atr_hist_sel}\n({dealer_sel} / {aps_sel})", fontsize=13, fontweight='bold', pad=15)
-
-
-    row_labels_raw = list(datos_hist_tabla.keys()) + ["Meta"]
-
-    row_labels = [f"■  {k}" for k in row_labels_raw]
-
-    cell_text = [[f"{v:.1%}" if pd.notna(v) else "—" for v in vals] for vals in datos_hist_tabla.values()] + [[f"{obj_h:.0%}"] * len(meses_h)]
-    
-
-    margen_dinamico = 0.12 + (len(row_labels) * 0.045)
-
-    plt.subplots_adjust(bottom=margen_dinamico)
-
-    
-
-    tbl = ax_h.table(cellText=cell_text, rowLabels=row_labels, colLabels=meses_h, loc='bottom', cellLoc='center')
-
-    tbl.auto_set_font_size(False); tbl.set_fontsize(8.5); tbl.scale(1, 1.8)
-
-    
-
-    for (r, c), cell in tbl.get_celld().items():
-
-        if r == 0: 
-
-            cell.set_facecolor("#1A1A2E"); cell.get_text().set_color("white"); cell.get_text().set_weight("bold")
-
-        elif c == -1: 
-
-            lbl_raw = row_labels_raw[r-1]
-
-            cell.get_text().set_weight("bold")
-
-            if lbl_raw in color_map: cell.get_text().set_color(color_map[lbl_raw])
-
-            if "TOTAL" in str(lbl_raw): cell.set_facecolor("#E8E8E8")
-
-            if "Meta" in str(lbl_raw): cell.set_facecolor("#FFF3E0")
-
-    buf = io.BytesIO()
-
-    fig_h.savefig(buf, format="jpeg", facecolor="white", bbox_inches="tight", dpi=150)
-
-    plt.close(fig_h)
-
-    buf.seek(0)
-
-    return buf.getvalue()
-
+def vista_radar(df_act, meses_eval, dealer_sel, aps_sel, score_col):
+    """Radar interactivo: dealers (o asesores) contra el promedio y la meta de cada atributo."""
+    import plotly.graph_objects as go
+    sub = df_act[df_act["mes_anio"].isin(meses_eval)].copy()
+    if sub.empty: st.info("Sin datos."); return
+    col_ent = "dealer" if (dealer_sel == "GENERAL" and aps_sel == "TODOS") else "aps_nombre"
+    if col_ent not in sub.columns: st.info("Sin datos para comparar."); return
+    sub = sub[~sub["atributo"].str.lower().str.contains("bien a la primera h1")]
+    w = sub[score_col] * sub["n_respuestas"]
+    sub = sub.assign(_w=w)
+    def ponderar(g): return g["_w"].sum() / g["n_respuestas"].sum() if g["n_respuestas"].sum() > 0 else np.nan
+    prom = sub.groupby("atributo").apply(ponderar)
+    atributos = list(prom.sort_values().index)          # del peor al mejor: lectura más clara
+    if len(atributos) < 3: st.info("Se necesitan al menos 3 atributos para el radar."); return
+    metas = sub.groupby("atributo")["obj_atributo"].mean().map(_meta_attr)
+    etiquetas = [textwrap.fill(a, 18).replace("\n", "<br>") for a in atributos]
+    cierre = lambda vals: list(vals) + [vals[0]]
+    fig = go.Figure()
+    fig.add_trace(go.Scatterpolar(r=cierre([metas.get(a, np.nan) for a in atributos]), theta=cierre(etiquetas), name="Meta",
+                                  line=dict(color=C["naranja"], dash="dash", width=2), hovertemplate="Meta %{r:.0%}<extra></extra>"))
+    fig.add_trace(go.Scatterpolar(r=cierre([prom.get(a, np.nan) for a in atributos]), theta=cierre(etiquetas), name="Promedio",
+                                  line=dict(color=C["navy"], width=4), fill="toself", fillcolor="rgba(26,26,46,0.08)",
+                                  hovertemplate="Promedio %{r:.1%}<extra></extra>"))
+    if aps_sel == "TODOS" or col_ent == "dealer":
+        entidades = sorted(e for e in sub[col_ent].unique() if str(e).upper() not in ("SIN DEALER", "SIN ASESOR"))
+        for k, ent in enumerate(entidades):
+            sc = sub[sub[col_ent] == ent].groupby("atributo").apply(ponderar)
+            fig.add_trace(go.Scatterpolar(r=cierre([sc.get(a, np.nan) for a in atributos]), theta=cierre(etiquetas), name=str(ent),
+                                          line=dict(color=COLORWAY[k % len(COLORWAY)], width=2), marker=dict(size=5),
+                                          hovertemplate=str(ent) + " %{r:.1%}<extra></extra>"))
+    piso = max(0.0, np.floor((np.nanmin(prom.values) - 0.1) * 10) / 10)
+    plotly_layout(fig, alto=680)
+    fig.update_layout(polar=dict(radialaxis=dict(range=[piso, 1.0], tickformat=".0%", gridcolor=C["linea"], angle=90),
+                                 angularaxis=dict(tickfont=dict(size=10), direction="clockwise")),
+                      legend=dict(orientation="h", y=-0.08))
+    mostrar_plotly(fig, key="pl_radar")
+    st.caption("Los atributos van del más débil al más fuerte (promedio). Clic en la leyenda para ocultar o mostrar series.")
 
 def render_atributos():
+    st.markdown("<div class='seccion-titulo'>Atributos — brechas y palancas</div>",unsafe_allow_html=True)
 
-    st.markdown("<div class='seccion-titulo'>📋 Resumen de Atributos</div>",unsafe_allow_html=True)
-
-    c1,c2,c3,c4,c5,c6 = st.columns([1.5, 1.5, 1.5, 1.5, 1, 1])
-
+    c1,c2,c3,c4,c5 = st.columns([1.5, 1.5, 1.5, 1.5, 1.3])
     with c1: fytd_sel=st.selectbox("Periodo:",todos_fytd,key="a_fytd")
-
     with c2:
-
         meses_a=meses_de(D["atributos"],fytd_sel,CIUDAD)
-
-        mes_sel=st.selectbox("Mes/Año:", ["TODOS"] + meses_a if meses_a else ["TODOS"], key="a_mes")
-
+        mes_sel=st.selectbox("Mes/Año:", ["TODOS"] + meses_a if meses_a else ["TODOS"], index=len(meses_a) if meses_a else 0, key="a_mes")
     with c3: dealer_sel=st.selectbox("Dealer:",dealers_para_ciudad(CIUDAD),key="a_dlr")
-
     with c4:
-
         aps_opts=aps_para_filtro(CIUDAD,dealer_sel,fytd_sel)
-
         aps_sel=st.selectbox("APS:",aps_opts,key="a_aps")
-
-        
-
-    if "atr_acum" not in st.session_state: st.session_state.atr_acum = False
-
     with c5:
-
-        st.markdown("<div style='margin-top:28px'></div>",unsafe_allow_html=True)
-
-        if st.button("Cargar",key="a_btn",width="stretch",type="primary"):
-
-            st.session_state.atr_acum = False; st.rerun()
-
-    with c6:
-
-        st.markdown("<div style='margin-top:28px'></div>",unsafe_allow_html=True)
-
-        if st.button("ACUM",key="a_btn_acum",width="stretch"):
-
-            st.session_state.atr_acum = True; st.rerun()
-
-
+        st.markdown("<div style='margin-top:30px'></div>",unsafe_allow_html=True)
+        acum_sel = st.toggle("Acumulado hasta el mes", key="a_acum")
+    st.session_state.atr_acum = acum_sel
 
     if D["atributos"].empty or (mes_sel=="TODOS" and not meses_a): st.info("Sin datos."); return
 
@@ -1621,7 +1705,7 @@ def render_atributos():
 
         meses_prev_eval = []
 
-    elif st.session_state.atr_acum:
+    elif acum_sel:
 
         if mes_sel in meses_cron_fytd:
 
@@ -1831,278 +1915,12 @@ def render_atributos():
 
 
 
-    col_rs_izq, col_rs_esp, col_rs_der = st.columns([1.4, 0.2, 1.4])
-
-    with col_rs_izq: 
-
-        st.markdown(tabla_html(styler_res), unsafe_allow_html=True)
-
-        boton_descarga_tabla(st, "📥 Descargar Tabla", df_resumen, lambda: cached_jpg_attr_table(df_resumen, cols_cache), "Atributos", "dl_attr")
-
-
-    with col_rs_der:
-
-        st.markdown("<div style='margin-bottom:15px; font-weight:900; color:#1A1A1A; font-size:22px;'>Atributos en Alerta</div>", unsafe_allow_html=True)
-
-        col_eval = 'GENERAL' if not usar_aps_nivel else '%'
-
-        if df_resumen.empty: st.info("Sin datos.")
-
-        else:
-
-            alertas = df_resumen[df_resumen[col_eval] < df_resumen['Objetivo']]
-
-            if alertas.empty: st.success("✅ Todo sobre el objetivo.")
-
-            else:
-
-                for index, row in alertas.iterrows():
-
-                    atr_n = row['Atributo']; gap_val = row['GAP']; obj_req = row['Objetivo']
-
-                    gap_str = "N/A" if pd.isna(gap_val) else (f"📉 {gap_val:+.1%}" if gap_val < 0 else f"📈 {gap_val:+.1%}")
-
-                    st.markdown(f"<div style='background:rgba(211,47,47,0.1); border-left:5px solid #D32F2F; padding:10px; margin-bottom:10px;'><span style='color: black;'><b>{atr_n}</b> (Meta: {obj_req:.0%})</span><br><span style='color:#D32F2F; font-size:18px; font-weight:900;'>{row[col_eval]:.1%}</span> <small style='color:#555;'>GAP: {gap_str}</small></div>", unsafe_allow_html=True)
-
-    st.markdown("</div>",unsafe_allow_html=True)
-
-
-    # =========================================================================
-
-    # ANÁLISIS HISTÓRICO: GRÁFICA + TABLA LEYENDA
-
-    # =========================================================================
-
-    st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
-
-    st.markdown("<div class='seccion-titulo'>📊 Análisis Histórico de Atributos</div>", unsafe_allow_html=True)
-
-
-    df_h_base = aplicar_filtro_ciudad(D["atributos"], CIUDAD)
-
-    df_h_base = df_h_base[df_h_base["fytd"] == fytd_sel]
-
-    df_h_aps = aplicar_filtro_ciudad(D["atrib_aps"], CIUDAD)
-
-    if not df_h_aps.empty: df_h_aps = df_h_aps[df_h_aps["fytd"] == fytd_sel]
-
-
-
-    lista_atr_hist = sorted([a for a in df_h_base["atributo"].unique() if "bien a la primera h1" not in a.lower()])
-
-    if not lista_atr_hist: return
-
-    atr_hist_sel = st.selectbox("Selecciona un Atributo:", lista_atr_hist, key="h_atr_sel")
-
-    meses_h = meses_de(D["atributos"], fytd_sel, CIUDAD)
-
-    
-
-    df_h_b_sel = df_h_base[df_h_base["atributo"] == atr_hist_sel]
-
-    df_h_a_sel = df_h_aps[df_h_aps["atributo"] == atr_hist_sel] if not df_h_aps.empty else pd.DataFrame()
-
-
-
-    def get_trend(df_sub):
-
-        vals = []
-
-        for m in meses_h:
-
-            g = df_sub[df_sub["mes_anio"] == m]
-
-            if g.empty: vals.append(np.nan)
-
-            else:
-
-                if "n_respuestas" in g.columns and g["n_respuestas"].sum() > 0:
-
-                    vals.append((g[score_col]*g["n_respuestas"]).sum()/g["n_respuestas"].sum())
-
-                else: vals.append(g[score_col].mean())
-
-        return vals
-
-
-
-    datos_hist_tabla = {}
-
-    color_map = {}
-
-    obj_h_raw = df_h_b_sel[obj_col].iloc[0] if not df_h_b_sel.empty else 0.85
-
-    obj_h = obj_h_raw / 100.0 if obj_h_raw > 2 else obj_h_raw
-
-    PALETA = ["#1976D2", "#D32F2F", "#388E3C", "#9C27B0", "#FF9800", "#00BCD4", "#E91E63", "#795548", "#607D8B"]
-
-
-
-    if dealer_sel == "GENERAL":
-
-        datos_hist_tabla["TOTAL GENERAL"] = get_trend(df_h_b_sel)
-
-        color_map["TOTAL GENERAL"] = "#000000"
-
-        for i, d in enumerate(sorted(df_h_b_sel["dealer"].unique())):
-
-            datos_hist_tabla[d] = get_trend(df_h_b_sel[df_h_b_sel["dealer"] == d])
-
-            color_map[d] = PALETA[i % len(PALETA)]
-
-                
-
-    elif dealer_sel != "GENERAL" and aps_sel == "TODOS":
-
-        datos_hist_tabla[f"TOTAL {dealer_sel}"] = get_trend(df_h_b_sel[df_h_b_sel["dealer"] == dealer_sel])
-
-        color_map[f"TOTAL {dealer_sel}"] = "#000000"
-
-        aps_list = sorted(df_h_a_sel[df_h_a_sel["dealer"] == dealer_sel]["aps_nombre"].unique())
-
-        for i, a in enumerate(aps_list):
-
-            datos_hist_tabla[a] = get_trend(df_h_a_sel[(df_h_a_sel["dealer"] == dealer_sel) & (df_h_a_sel["aps_nombre"] == a)])
-
-            color_map[a] = PALETA[i % len(PALETA)]
-
-    else:
-
-        datos_hist_tabla[aps_sel] = get_trend(df_h_a_sel[(df_h_a_sel["dealer"] == dealer_sel) & (df_h_a_sel["aps_nombre"] == aps_sel)])
-
-        color_map[aps_sel] = "#1976D2"
-
-
-
-    color_map["Meta"] = COLOR_OBJETIVO
-
-
-
-    img_bytes = cached_hist_plot_attr(datos_hist_tabla, color_map, meses_h, obj_h, atr_hist_sel, dealer_sel, aps_sel)
-
-    
-
-    st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
-
-    st.image(img_bytes, width="stretch")
-
-    st.download_button("📥 Descargar Gráfica Completa", data=img_bytes, file_name=f"Tendencia_{atr_hist_sel}.jpg", mime="image/jpeg", key="dl_hist_full")
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-# ==============================================================================
-# SECCIÓN 4: RADIAL
-# ==============================================================================
-
-import matplotlib.patheffects as path_effects
-
-def render_radial():
-    st.markdown("<div class='seccion-titulo'>Comparativo Radial de Talleres</div>",unsafe_allow_html=True)
-    
-    c1,c2,c3,c4,c5=st.columns([2,2,2,1,1])
-    with c1: fytd_sel=st.selectbox("Periodo:",todos_fytd,key="r_fytd")
-    with c2:
-        meses_r=meses_de(D["atributos"],fytd_sel,CIUDAD)
-        mes_sel=st.selectbox("Mes/Año:", ["TODOS"] + meses_r if meses_r else ["TODOS"], key="r_mes")
-    with c3:
-        dlrs_r=dealers_para_ciudad(CIUDAD)
-        dealer_sel=st.selectbox("Dealer:",dlrs_r,key="r_dlr")
-        
-    if "rad_acum" not in st.session_state: st.session_state.rad_acum = False
-    with c4:
-        st.markdown("<div style='margin-top:28px'></div>",unsafe_allow_html=True)
-        if st.button("Cargar",key="r_btn",width="stretch",type="primary"):
-            st.session_state.rad_acum = False; st.rerun()
-    with c5:
-        st.markdown("<div style='margin-top:28px'></div>",unsafe_allow_html=True)
-        if st.button("ACUM",key="r_btn_acum",width="stretch"):
-            st.session_state.rad_acum = True; st.rerun()
-
-    if D["atributos"].empty or (mes_sel=="TODOS" and not meses_r): st.info("Sin datos."); return
-
-    if mes_sel == 'TODOS': meses_r_eval = meses_r
-    elif st.session_state.rad_acum:
-        if mes_sel in meses_r:
-            idx = meses_r.index(mes_sel)
-            meses_r_eval = meses_r[:idx+1]
-        else: meses_r_eval = []
-    else:
-        meses_r_eval = [mes_sel]
-
-    if dealer_sel == "GENERAL":
-        df_a = filtrar(D["atributos"], fytd=fytd_sel, ciudad=CIUDAD)
-    else:
-        df_a = filtrar(D["atrib_aps"], fytd=fytd_sel, ciudad=CIUDAD, dealer=dealer_sel)
-        
-    df_a = df_a[df_a["mes_anio"].isin(meses_r_eval)]
-    df_a = df_a[df_a["dealer"] != "SIN DEALER"]
-    if "aps_nombre" in df_a.columns:
-        df_a = df_a[~df_a["aps_nombre"].astype(str).str.upper().str.contains("SIN ASESOR", na=False)]
-        
-    if df_a.empty: st.warning("Sin datos para la selección."); return
-
-    if dealer_sel == "GENERAL":
-        entidades = sorted(df_a["dealer"].unique())
-        col_nombre = "dealer"
-        prefijo = "Taller: "
-        PALETA_RADIAL = ["#1976D2", "#D32F2F", "#388E3C", "#9C27B0", "#FF9800", "#00BCD4", "#E91E63", "#795548", "#607D8B"]
-    else:
-        entidades = sorted(df_a["aps_nombre"].unique())
-        col_nombre = "aps_nombre"
-        prefijo = "APS: "
-        PALETA_RADIAL = ["#E91E63","#9C27B0","#3F51B5","#00BCD4","#4CAF50","#FF9800","#795548","#607D8B","#F44336","#009688","#CDDC39","#FF5722"]
-
-    attrs_disponibles=sorted(df_a["atributo"].unique())
-    if not attrs_disponibles: st.warning("Sin atributos."); return
-
-    score_col="pct_score" if "pct_score" in df_a.columns else "pct_top2box"
-
-    def gral_dict(df_sub):
-        res={}
-        for attr in attrs_disponibles:
-            sub=df_sub[df_sub["atributo"]==attr]
-            if sub.empty: continue
-            res[attr] = (sub[score_col]*sub["n_respuestas"]).sum()/sub["n_respuestas"].sum() if "n_respuestas" in sub.columns and sub["n_respuestas"].sum()>0 else sub[score_col].mean()
-        return res
-
-    gral=gral_dict(df_a); obj_isc_r=get_obj(D["objetivos"],fytd_sel,"obj_isc")
-    N=len(attrs_disponibles); angles=np.linspace(0,2*np.pi,N,endpoint=False).tolist(); angles+=angles[:1]
-
-    fig,ax=plt.subplots(figsize=(11,11),subplot_kw=dict(polar=True),facecolor="white"); ax.set_facecolor("#FAFAFA")
-    efecto = [path_effects.withStroke(linewidth=2, foreground="white", alpha=0.9)]
-
-    vg=[gral.get(a,0) for a in attrs_disponibles]+[gral.get(attrs_disponibles[0],0)]
-    ax.fill(angles,vg,alpha=0.15,color="#1A1A2E"); ax.plot(angles,vg,color="#1A1A2E",linewidth=3,linestyle="-",label="PROM. GENERAL")
-    ax.plot(angles,[obj_isc_r]*(N+1),color=COLOR_OBJETIVO,linewidth=2,linestyle="--",label=f"Objetivo ({obj_isc_r:.0%})")
-
-    for i, ent in enumerate(entidades):
-        sub_d=df_a[df_a[col_nombre]==ent]; dd=gral_dict(sub_d)
-        vd=[dd.get(a,0) for a in attrs_disponibles]+[dd.get(attrs_disponibles[0],0)]
-        color_d = PALETA_RADIAL[i % len(PALETA_RADIAL)]
-        ax.plot(angles,vd,color=color_d,linewidth=1.8,linestyle="-",marker='o',markersize=5,label=f"{prefijo}{ent}")
-        
-        for j, val in enumerate(vd[:-1]):
-            if pd.notna(val) and val > 0:
-                ax.text(angles[j], val + 0.05, f"{val:.0%}", color=color_d, fontsize=8, fontweight='bold', ha='center', va='center', path_effects=efecto, zorder=5)
-
-    for i,(angle,attr) in enumerate(zip(angles[:-1],attrs_disponibles)):
-        val_g=gral.get(attr,0); ha="left" if angle<np.pi else "right"
-        if abs(angle-np.pi/2)<0.1 or abs(angle-3*np.pi/2)<0.1: ha="center"
-        ax.text(angle,1.25,f"{textwrap.fill(attr,14)}\n{val_g:.1%}", ha=ha,va="center",fontsize=8,color="#1A1A1A",fontweight="bold",linespacing=1.3)
-
-    ax.set_xticks([]); ax.set_yticks([0.2,0.4,0.6,0.8,1.0]); ax.set_yticklabels(["20%","40%","60%","80%","100%"],fontsize=7,color="#888")
-    ax.set_ylim(0,1.25); ax.spines["polar"].set_color("#DDD"); ax.grid(color="#DDD",linewidth=0.7)
-    
-    str_acum = " (ACUM)" if st.session_state.rad_acum and mes_sel != "TODOS" else ""
-    ax.set_title(f"Comparativo Radial ({mes_sel}{str_acum}){f' — {dealer_sel}' if dealer_sel!='GENERAL' else ''}",fontsize=16,fontweight="bold",pad=40,color="#1A1A1A")
-    
-    ax.legend(loc="lower center",bbox_to_anchor=(0.5,-0.15),fontsize=9,frameon=True,facecolor="white",edgecolor="#CCC", ncol=3)
-
-    st.markdown("<div class='chart-box'>",unsafe_allow_html=True)
-    _,col_c,_=st.columns([0.1,2.8,0.1]); col_c.pyplot(fig)
-    st.download_button("Descargar Radial", data=fig_to_buf(fig), file_name="Radial.jpg", mime="image/jpeg", key="dl_rad")
-    st.markdown("</div>",unsafe_allow_html=True)
+    vistas = ["Mapa de brechas", "Evolución", "Palancas", "Radar"]
+    vista = st.segmented_control("Vista", vistas, default=vistas[0], key="a_vista", label_visibility="collapsed") or vistas[0]
+    if vista == vistas[0]:   vista_brechas(df_resumen, cols_cache, styler_res)
+    elif vista == vistas[1]: vista_evolucion(fytd_sel, dealer_sel, aps_sel, score_col, obj_col)
+    elif vista == vistas[2]: vista_palancas(df_resumen, meses_act_eval, dealer_sel, aps_sel)
+    else:                    vista_radar(df_act, meses_act_eval, dealer_sel, aps_sel, score_col)
 
 # ==============================================================================
 # SECCIÓN 5: PENDIENTES
@@ -2138,6 +1956,132 @@ def _estilo_alertas(t):
                                             else ("color:#388E3C;font-weight:bold" if c == "Estado" else "")) for c in row.index],
                          axis=1).set_table_attributes('class="tabla-voc"').hide(axis="index")
 
+# ==============================================================================
+# EMBUDO DE ENVÍO (del link enviado a la encuesta respondida)
+# ==============================================================================
+def tarjetas_alertas(pend, max_n=6):
+    """Tarjetas con cuenta regresiva de las alertas pendientes (casos graves a atender en 24 h)."""
+    if pend.empty: return
+    cols = st.columns(min(3, len(pend)))
+    for i_, (_, r_) in enumerate(pend.head(max_n).iterrows()):
+        d_ = r_["dias_para_expirar"]
+        urg = "#C62828" if (pd.notna(d_) and d_ <= 1) else "#F57F17"
+        txt_d = "sin fecha" if pd.isna(d_) else (f"vence en {int(d_)} día{'s' if int(d_) != 1 else ''}")
+        mot = "" if pd.isna(r_["verbalizacion"]) else str(r_["verbalizacion"])
+        mot = mot if len(mot) <= 140 else mot[:137] + "..."
+        cols[i_ % len(cols)].markdown(
+            f"<div style='background:#fff;border-top:5px solid {urg};border-radius:10px;padding:12px 14px;margin-bottom:10px;box-shadow:0 2px 10px rgba(26,26,46,.08)'>"
+            f"<div style='font-weight:700;color:{urg};font-size:13px'>{txt_d.upper()} · NOTA {'—' if pd.isna(r_['satisfaccion']) else int(r_['satisfaccion'])}</div>"
+            f"<div style='font-size:16px;font-weight:700;color:#1A1A2E;margin-top:2px'>{_html.escape(str(r_['cliente_nombre']))}</div>"
+            f"<div style='font-size:12px;color:#777'>{_html.escape(str(r_['vehiculo']))} · {_html.escape(str(r_['vin']))}<br>Asesor: {_html.escape(str(r_['aps_nombre']))}</div>"
+            f"<div style='font-size:13px;color:#444;margin-top:6px'>{_html.escape(mot)}</div></div>", unsafe_allow_html=True)
+    if len(pend) > max_n: st.caption(f"Y {len(pend) - max_n} más en el detalle.")
+
+_DIAS_SEM = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+
+def render_embudo():
+    import plotly.graph_objects as go
+    st.markdown("<div class='seccion-titulo'>Embudo de envío — del link a la respuesta</div>", unsafe_allow_html=True)
+    if D["embudo"].empty:
+        st.info("Aún no hay datos del embudo. Reprocesa los meses en el preprocesador actualizado (genera el archivo 16)."); return
+    df_all = aplicar_filtro_ciudad(D["embudo"], CIUDAD)
+    if df_all.empty: st.info("Sin datos para la ciudad seleccionada."); return
+
+    c1, c2, c3, c4, c5 = st.columns([1.4, 1.4, 1.6, 1.6, 1.3])
+    with c1: fytd_e = st.selectbox("Periodo:", sorted(df_all["fytd"].unique(), reverse=True), key="em_fytd")
+    mm = meses_de(df_all, fytd_e)
+    with c2: mes_e = st.selectbox("Mes/Año:", ["TODOS"] + mm, index=len(mm), key="em_mes")
+    with c3: dealer_e = st.selectbox("Dealer:", ["GENERAL"] + sorted(x for x in df_all["dealer"].unique() if x != "SIN DEALER"), key="em_dlr")
+    base_a = df_all if dealer_e == "GENERAL" else df_all[df_all["dealer"] == dealer_e]
+    with c4: aps_e = st.selectbox("Asesor:", ["TODOS"] + sorted(x for x in base_a["aps_nombre"].unique() if "SIN ASESOR" not in str(x).upper()), key="em_aps")
+    with c5:
+        st.markdown("<div style='margin-top:30px'></div>", unsafe_allow_html=True)
+        acum_e = st.toggle("Acumulado hasta el mes", key="em_acum")
+    if mes_e == "TODOS": meses_e = mm
+    elif acum_e: meses_e = mm[:mm.index(mes_e) + 1]
+    else: meses_e = [mes_e]
+
+    df = df_all[(df_all["fytd"] == fytd_e) & (df_all["mes_anio"].isin(meses_e))]
+    if dealer_e != "GENERAL": df = df[df["dealer"] == dealer_e]
+    if aps_e != "TODOS": df = df[df["aps_nombre"] == aps_e]
+    if df.empty or df["enviadas"].sum() == 0: st.info("Sin envíos para la selección."); return
+    S = df.sum(numeric_only=True)
+    div = lambda a, b: (a / b) if b else np.nan
+
+    # --- Embudo ---
+    pasos = [("Enviadas", S["enviadas"]), ("Entregadas", S["entregadas"]), ("Abiertas", S["abiertas"]),
+             ("Interactuaron con el link", S["interactuaron"]), ("Respondieron", S["realizadas"])]
+    obj_tre = get_obj(D["objetivos"], fytd_e, "obj_tre")
+    tre = div(S["realizadas"], S["enviadas"])
+    k = st.columns(4)
+    k[0].markdown(kpi_card("TRE (respondieron / enviadas)", f"{tre:.1%}", f"Meta {obj_tre:.0%} · {S['realizadas']:.0f} de {S['enviadas']:.0f}",
+                           color=_color_kpi(tre, obj_tre)), unsafe_allow_html=True)
+    k[1].markdown(kpi_card("Apertura", f"{div(S['abiertas'], S['entregadas']):.0%}", "abrieron el mensaje / entregadas"), unsafe_allow_html=True)
+    k[2].markdown(kpi_card("Conversión del link", f"{div(S['realizadas'], S['interactuaron']):.0%}", "respondieron / entraron al link"), unsafe_allow_html=True)
+    t_med = div(S["t_sum"], S["t_n"])
+    k[3].markdown(kpi_card("Tiempo medio de respuesta", "—" if t_med != t_med else f"{t_med:.1f} días", f"{S['t_n']:.0f} respuestas medidas"), unsafe_allow_html=True)
+    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+
+    # mayor pérdida relativa entre pasos consecutivos
+    perd = [(pasos[i][0], pasos[i + 1][0], div(pasos[i + 1][1], pasos[i][1])) for i in range(len(pasos) - 1) if pasos[i][1] > 0]
+    if perd:
+        a_, b_, r_ = min(perd, key=lambda x: x[2])
+        st.markdown(f"<div class='banner-alerta' style='background:#FFF8E1;border-left-color:#F57F17;color:#5D4037'>Mayor pérdida del embudo: de "
+                    f"<b>{a_}</b> a <b>{b_}</b> solo pasa el <b>{r_:.0%}</b>.</div>", unsafe_allow_html=True)
+
+    col_f, col_d = st.columns([1.3, 1])
+    with col_f, st.container(key="card_emb_funnel"):
+        st.markdown("<div class='card-titulo'>Embudo</div>", unsafe_allow_html=True)
+        fig = go.Figure(go.Funnel(y=[n for n, _ in pasos], x=[v for _, v in pasos], textposition="inside", textinfo="value+percent initial",
+                                  marker=dict(color=[C["navy"], "#303052", "#4A4A78", "#388E3C", "#2E7D32"]),
+                                  hovertemplate="<b>%{y}</b><br>%{x:.0f} (%{percentInitial:.0%} de las enviadas)<extra></extra>"))
+        plotly_layout(fig, alto=360, leyenda_abajo=False)
+        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
+        mostrar_plotly(fig, key="pl_emb_funnel")
+    with col_d, st.container(key="card_emb_canal"):
+        st.markdown("<div class='card-titulo'>Cómo y cuándo responden</div>", unsafe_allow_html=True)
+        tot_r = S["realizadas"]
+        fig2 = go.Figure()
+        buckets = [("Mismo día", S["t_0"]), ("1 día", S["t_1"]), ("2-3 días", S["t_2_3"]), ("4+ días", S["t_4mas"])]
+        fig2.add_trace(go.Bar(x=[b[0] for b in buckets], y=[b[1] for b in buckets], marker_color=C["navy"],
+                              text=[f"{div(b[1], S['t_n']):.0%}" if S["t_n"] else "" for b in buckets], textposition="outside",
+                              hovertemplate="%{x}: %{y:.0f} respuestas<extra></extra>"))
+        plotly_layout(fig2, alto=230, leyenda_abajo=False)
+        fig2.update_layout(margin=dict(l=10, r=10, t=10, b=10)); fig2.update_yaxes(visible=False, range=[0, max(b[1] for b in buckets) * 1.3 + 1])
+        mostrar_plotly(fig2, key="pl_emb_tiempo")
+        st.caption("Tiempo entre el envío del link y la respuesta.")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Por WhatsApp", f"{div(S['resp_whatsapp'], tot_r):.0%}" if tot_r else "—")
+        m2.metric("Por email", f"{div(S['resp_email'], tot_r):.0%}" if tot_r else "—")
+        m3.metric("Opcionales completas", f"{div(S['opcionales'], tot_r):.0%}" if tot_r else "—")
+
+    # --- Día de envío ---
+    dias = [(_DIAS_SEM[i], S[f"env_d{i}"], S[f"real_d{i}"]) for i in range(7) if S[f"env_d{i}"] > 0]
+    with st.container(key="card_emb_dia"):
+        st.markdown("<div class='card-titulo'>Tasa de respuesta según el día del envío</div>", unsafe_allow_html=True)
+        figd = go.Figure(go.Bar(x=[d[0] for d in dias], y=[div(d[2], d[1]) for d in dias], marker_color=C["amarillo"], marker_line_color=C["navy"], marker_line_width=1.5,
+                                text=[f"{div(d[2], d[1]):.0%}<br>n={d[1]:.0f}" for d in dias], textposition="outside", customdata=[[d[1], d[2]] for d in dias],
+                                hovertemplate="<b>%{x}</b><br>%{customdata[1]:.0f} respuestas de %{customdata[0]:.0f} enviadas<extra></extra>"))
+        figd.add_hline(y=tre, line_dash="dash", line_color=C["naranja"], annotation_text=f"Promedio {tre:.0%}", annotation_position="top left")
+        plotly_layout(figd, alto=300, leyenda_abajo=False)
+        figd.update_yaxes(tickformat=".0%", range=[0, max(div(d[2], d[1]) for d in dias) * 1.35 + 0.02])
+        mostrar_plotly(figd, key="pl_emb_dia")
+        mejor = max(dias, key=lambda d: div(d[2], d[1]))
+        st.caption(f"Mejor día de envío en esta selección: **{mejor[0]}** ({div(mejor[2], mejor[1]):.0%}, {mejor[1]:.0f} envíos). Con pocos envíos por día la lectura es orientativa.")
+
+    # --- Por asesor ---
+    with st.container(key="card_emb_aps"):
+        st.markdown("<div class='card-titulo'>Embudo por asesor</div>", unsafe_allow_html=True)
+        g = df.groupby("aps_nombre")[["enviadas", "entregadas", "abiertas", "interactuaron", "realizadas"]].sum()
+        g = g[g.index.astype(str).str.upper() != "SIN ASESOR"]
+        t = pd.DataFrame({"Enviadas": g["enviadas"], "Abiertas": g["abiertas"] / g["entregadas"].where(g["entregadas"] > 0),
+                          "Interactuaron": g["interactuaron"] / g["enviadas"], "Respondieron": g["realizadas"],
+                          "TRE": g["realizadas"] / g["enviadas"]}).sort_values("TRE")
+        t.index.name = "Asesor"
+        st.dataframe(t.style.format({"Enviadas": "{:.0f}", "Abiertas": "{:.0%}", "Interactuaron": "{:.0%}", "Respondieron": "{:.0f}", "TRE": "{:.1%}"}, na_rep="—")
+                      .background_gradient(subset=["TRE"], cmap="RdYlGn", vmin=0.2, vmax=0.8), width="stretch")
+        st.caption("Abiertas = % de los mensajes entregados que se abrieron; Interactuaron = % de las enviadas cuyo link fue abierto.")
+
 def render_alertas():
     st.markdown("<div class='seccion-titulo'>Alertas de Clientes — atención en 24 h</div>", unsafe_allow_html=True)
     if D["alertas"].empty:
@@ -2170,6 +2114,47 @@ def render_alertas():
     with k4: st.markdown(kpi_html("Atendidas en 24 h", n_24 / tot if tot else 0, "{:.0%}", f"{n_24} de {tot}", color="#388E3C" if tot and n_24 == tot else "#F57F17"), unsafe_allow_html=True)
 
     st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+
+    # --- Por atender ahora: tarjetas con cuenta regresiva ---
+    _pend = df_f[df_f["estado"] == "Pendiente"].sort_values("dias_para_expirar")
+    if not _pend.empty:
+        st.markdown("<div class='card-titulo' style='color:#C62828'>Por atender ahora</div>", unsafe_allow_html=True)
+        tarjetas_alertas(_pend)
+
+    # --- Evolución mensual: alertas y % atendidas en 24 h contra la meta ---
+    _hist = aplicar_filtro_ciudad(D["alertas"], CIUDAD)
+    _hist = _hist[_hist["fytd"] == fytd_a]
+    if dealer_a != "LISTADO GENERAL": _hist = _hist[_hist["dealer"] == dealer_a]
+    if aps_a != "TODOS": _hist = _hist[_hist["aps_nombre"] == aps_a]
+    if not _hist.empty:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+        # el archivo de alertas no trae orden_mes: se deriva de "Mes AAAA"
+        _hist = _hist.assign(orden_mes=_hist["mes_anio"].map(lambda m: int(str(m).split()[1]) * 100 + _MESES_NUM.get(str(m).split()[0], 0)))
+        _g = _hist.groupby(["orden_mes", "mes_anio"]).apply(lambda x: pd.Series({
+            "Pendiente": (x["estado"] == "Pendiente").sum(), "Vencida": (x["estado"] == "Vencida").sum(), "Gestionada": (x["estado"] == "Gestionada").sum(),
+            "pct24": (x["en_tiempo_24h"] == "Sí").sum() / max(1, x["en_tiempo_24h"].isin(["Sí", "No"]).sum())})).reset_index().sort_values("orden_mes")
+        _meta24 = get_obj(D["objetivos"], fytd_a, "Alertas atendidas en 24 Hrs")
+        _meta24 = _meta24 / 100.0 if _meta24 > 2 else _meta24
+        with st.container(key="card_al_evol"):
+            st.markdown("<div class='card-titulo'>Evolución de alertas y cumplimiento en 24 h</div>", unsafe_allow_html=True)
+            _f = make_subplots(specs=[[{"secondary_y": True}]])
+            for est_, col_ in (("Gestionada", C["ok"]), ("Vencida", C["gris"]), ("Pendiente", C["mal"])):
+                _f.add_trace(go.Bar(x=_g["mes_anio"], y=_g[est_], name=est_, marker_color=col_,
+                                    hovertemplate=est_ + ": %{y:.0f}<extra></extra>"), secondary_y=False)
+            _f.add_trace(go.Scatter(x=_g["mes_anio"], y=_g["pct24"], name="% atendidas en 24 h", mode="lines+markers+text",
+                                    line=dict(color=C["navy"], width=3), marker=dict(size=9, color=C["amarillo"], line=dict(color=C["navy"], width=2)),
+                                    text=[f"{v:.0%}" for v in _g["pct24"]], textposition="top center",
+                                    hovertemplate="%{y:.0%} atendidas en 24 h<extra></extra>"), secondary_y=True)
+            if _meta24 > 0:
+                _f.add_hline(y=_meta24, line_dash="dash", line_color=C["naranja"], secondary_y=True,
+                             annotation_text=f"Meta {_meta24:.0%}", annotation_position="top left")
+            plotly_layout(_f, alto=320)
+            _f.update_layout(barmode="stack")
+            _f.update_yaxes(title="Alertas", secondary_y=False, rangemode="tozero")
+            _f.update_yaxes(tickformat=".0%", range=[0, 1.1], showgrid=False, secondary_y=True)
+            mostrar_plotly(_f, key="pl_al_evol")
+
     filtro = st.radio("Mostrar:", ["Todas", "Pendiente", "Vencida", "Gestionada"], horizontal=True, key="al_estado")
     df_m = df_f if filtro == "Todas" else df_f[df_f["estado"] == filtro]
     df_m = df_m.assign(_o=df_m["estado"].map(_ORDEN_ALERTA).fillna(3)).sort_values(["_o", "dias_para_expirar", "aps_nombre"]).drop(columns="_o")
@@ -2185,7 +2170,6 @@ def render_alertas():
         boton_descarga_tabla(st, "Descargar Alertas", t, lambda: cached_jpg_export(t, 'alertas'), "Alertas", "dl_alertas")
     st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
     st.markdown("**Resumen por Asesor**")
     res = (df_f.assign(Pendientes=(df_f["estado"] == "Pendiente").astype(int), Vencidas=(df_f["estado"] == "Vencida").astype(int),
                        Gestionadas=(df_f["estado"] == "Gestionada").astype(int), En24=(df_f["en_tiempo_24h"] == "Sí").astype(int))
@@ -2197,8 +2181,18 @@ def render_alertas():
     st_r = res.style.apply(lambda row: ["background-color:#ffcccc;font-weight:bold" if c == "Pendientes" and row["Pendientes"] > 0
                                         else ("background-color:#E8E8E8;font-weight:bold" if row["Asesor"] == "TOTAL GENERAL" else "") for c in row.index],
                            axis=1).set_table_attributes('class="tabla-voc"').hide(axis="index")
-    st.markdown(tabla_html(st_r), unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+    _rb = res[res["Asesor"] != "TOTAL GENERAL"]
+    if not _rb.empty:
+        import plotly.graph_objects as go
+        _fa = go.Figure()
+        for est_, col_ in (("Gestionadas", C["ok"]), ("Vencidas", C["gris"]), ("Pendientes", C["mal"])):
+            _fa.add_trace(go.Bar(y=_rb["Asesor"], x=_rb[est_], name=est_, orientation="h", marker_color=col_,
+                                 hovertemplate="<b>%{y}</b><br>" + est_ + ": %{x}<extra></extra>"))
+        plotly_layout(_fa, alto=max(220, 36 * len(_rb) + 90))
+        _fa.update_layout(barmode="stack"); _fa.update_yaxes(autorange="reversed", showgrid=False); _fa.update_xaxes(dtick=1)
+        mostrar_plotly(_fa, key="pl_al_aps")
+    with st.expander("Ver tabla"):
+        st.markdown(tabla_html(st_r), unsafe_allow_html=True)
 
 @st.cache_data(show_spinner=False)
 def procesar_fechas_pendientes(df_raw, ciudad):
@@ -2332,6 +2326,18 @@ def render_pendientes():
         for col in ["Total Enviadas", "Completadas", "Vencidas", "Pendientes"]:
             if col in res_a.columns: res_a[col] = res_a[col].astype(int)
 
+    _rb = res_a[res_a["Asesor"] != "TOTAL GENERAL"] if not res_a.empty else res_a
+    if not _rb.empty and {"Completadas", "Pendientes", "Vencidas"} <= set(_rb.columns):
+        import plotly.graph_objects as go
+        _fp = go.Figure()
+        for nom_, col_ in (("Completadas", C["ok"]), ("Pendientes", C["alerta"]), ("Vencidas", C["mal"])):
+            _fp.add_trace(go.Bar(y=_rb["Asesor"], x=_rb[nom_], name=nom_, orientation="h", marker_color=col_,
+                                 hovertemplate="<b>%{y}</b><br>" + nom_ + ": %{x}<extra></extra>"))
+        plotly_layout(_fp, alto=max(240, 36 * len(_rb) + 90))
+        _fp.update_layout(barmode="stack"); _fp.update_yaxes(autorange="reversed", showgrid=False)
+        mostrar_plotly(_fp, key="pl_pend_aps")
+        st.caption("Cada barra suma las encuestas enviadas del asesor: completadas, pendientes (aún vigentes) y vencidas.")
+
     st_ra = res_a.style.apply(lambda row: ["background-color:#ffcccc;color:black;font-weight:bold" if c == "Vencidas" and row["Vencidas"] > 0 else ("background-color:#E8E8E8;font-weight:bold" if row["Asesor"] == "TOTAL GENERAL" else "") for c in row.index], axis=1).format({"Total Enviadas":"{:.0f}", "Completadas":"{:.0f}", "Vencidas":"{:.0f}", "Pendientes":"{:.0f}"}).set_table_attributes('class="tabla-voc"').hide(axis="index")
     st.markdown(tabla_html(st_ra), unsafe_allow_html=True)
     
@@ -2342,338 +2348,366 @@ def render_pendientes():
 # ==============================================================================
 # SECCIÓN 6: VERBALIZACIONES
 # ==============================================================================
+def _clean_pct(x):
+    try:
+        if pd.isna(x) or str(x).strip() in ["-", ""]: return 0.0
+        return float(str(x).split('%')[0].strip())
+    except Exception: return 0.0
+
+def agregar_temas(df):
+    """Una fila por tema para los meses elegidos: % de menciones, satisfacción neta y conteos positivo/negativo.
+    Meses reconstruidos del RawData (traen conteos) se ponderan; los antiguos (tabla pegada a mano) se promedian."""
+    d = df.copy()
+    d["sat_neta"] = d["SATISFACCIÓN NETA"].apply(_clean_pct)
+    d["menciones_pct"] = d["Comentarios relacionados"].apply(_clean_pct)
+    for c in ("n_menciones", "n_base", "n_i16", "n_i78", "n_pos", "n_neg"):
+        if c not in d.columns: d[c] = np.nan
+    cols = ["Sub-Categoría", "Categoría", "sat_neta", "menciones_pct", "n_menciones", "n_pos", "n_neg"]
+    partes = []
+    nuevo = d[d["n_menciones"].notna()]; viejo = d[d["n_menciones"].isna()]
+    if not nuevo.empty:
+        base_tot = nuevo.drop_duplicates(["mes_anio", "ciudad"])["n_base"].sum() or 1
+        g = nuevo.groupby("Sub-Categoría").agg(n=("n_menciones", "sum"), i16=("n_i16", "sum"), i78=("n_i78", "sum"),
+                                               n_pos=("n_pos", "sum"), n_neg=("n_neg", "sum"), Categoría=("Categoría", "first")).reset_index()
+        g["sat_neta"] = (g["n"] - 2 * g["i16"] - g["i78"]) / g["n"] * 100
+        g["menciones_pct"] = g["n"] / base_tot * 100
+        g["n_menciones"] = g["n"]
+        # categoría = signo predominante cuando hay conteos
+        g["Categoría"] = np.where(g["n_pos"] > g["n_neg"], "Positivo", np.where(g["n_neg"] > g["n_pos"], "Negativo", "Mixto"))
+        partes.append(g[cols])
+    if not viejo.empty:
+        partes.append(viejo[cols])
+    if not partes: return pd.DataFrame(columns=cols)
+    out = pd.concat(partes, ignore_index=True)
+    out = out.groupby("Sub-Categoría").agg(Categoría=("Categoría", "first"), sat_neta=("sat_neta", "mean"),
+                                           menciones_pct=("menciones_pct", "sum"), n_menciones=("n_menciones", "sum"),
+                                           n_pos=("n_pos", "sum"), n_neg=("n_neg", "sum")).reset_index()
+    return out[out["menciones_pct"] > 0].sort_values("menciones_pct", ascending=False).reset_index(drop=True)
+
+_COL_SENT = {"Positivo": "#388E3C", "Negativo": "#D32F2F", "Mixto": "#F57F17", "Sin tema": "#9E9E9E"}
+
+def vista_mapa_temas(agg):
+    """Burbujas (menciones vs satisfacción neta) y balance positivo/negativo por tema."""
+    import plotly.graph_objects as go
+    c_izq, c_der = st.columns([1.35, 1])
+    with c_izq, st.container(key="card_vb_mapa"):
+        st.markdown("<div class='card-titulo'>Mapa de impacto de los temas</div>", unsafe_allow_html=True)
+        fig = go.Figure()
+        rotulados = set(agg.head(7)["Sub-Categoría"])      # solo los más mencionados llevan etiqueta (el resto, al pasar el mouse)
+        for cat, g in agg.groupby("Categoría"):
+            fig.add_trace(go.Scatter(
+                x=g["sat_neta"], y=g["menciones_pct"], mode="markers+text", name=cat,
+                text=[t if t in rotulados else "" for t in g["Sub-Categoría"]],
+                textposition="top center", textfont=dict(size=10),
+                marker=dict(size=(g["menciones_pct"].clip(lower=1) ** 0.5) * 5 + 8, color=_COL_SENT.get(cat, C["gris"]),
+                            opacity=0.85, line=dict(color="white", width=1.5)),
+                customdata=np.c_[g["n_menciones"].fillna(0), g["Sub-Categoría"]],
+                hovertemplate="<b>%{customdata[1]}</b><br>Menciones: %{y:.1f}% de los clientes (%{customdata[0]:.0f})<br>Satisfacción neta: %{x:.0f}%<extra></extra>"))
+        fig.add_vline(x=75, line_dash="dash", line_color=C["naranja"], annotation_text="Ref. 75%", annotation_position="top")
+        x0 = min(-5, agg["sat_neta"].min() - 10)
+        fig.add_shape(type="rect", x0=x0, x1=75, y0=0, y1=agg["menciones_pct"].max() * 1.2, fillcolor=C["mal"], opacity=0.05, line_width=0, layer="below")
+        plotly_layout(fig, alto=520)
+        fig.update_xaxes(title="Satisfacción neta de quienes mencionan el tema (%)", range=[x0, 118], showgrid=True, gridcolor=C["linea"])
+        fig.update_yaxes(title="% de clientes que lo mencionan", range=[0, agg["menciones_pct"].max() * 1.25])
+        mostrar_plotly(fig, key="pl_vb_mapa")
+        st.caption("Tamaño = menciones. Zona roja a la izquierda: temas que restan satisfacción; mientras más arriba, más clientes lo viven.")
+    with c_der, st.container(key="card_vb_bal"):
+        st.markdown("<div class='card-titulo'>Positivo vs negativo por tema</div>", unsafe_allow_html=True)
+        d = agg[(agg["n_pos"] + agg["n_neg"]) > 0].copy()
+        if d.empty:
+            st.info("El balance positivo/negativo está disponible para los meses procesados desde el RawData.")
+        else:
+            d["tot"] = d["n_pos"] + d["n_neg"]
+            d = d.sort_values("tot").tail(12)
+            fig2 = go.Figure()
+            fig2.add_trace(go.Bar(y=d["Sub-Categoría"], x=d["n_pos"], orientation="h", name="Positivo", marker_color=C["ok"],
+                                  text=d["n_pos"].map(lambda v: f"{v:.0f}" if v else ""), textposition="outside",
+                                  hovertemplate="<b>%{y}</b><br>%{x:.0f} positivos<extra></extra>"))
+            fig2.add_trace(go.Bar(y=d["Sub-Categoría"], x=-d["n_neg"], orientation="h", name="Negativo", marker_color=C["mal"],
+                                  text=d["n_neg"].map(lambda v: f"{v:.0f}" if v else ""), textposition="outside", customdata=d["n_neg"],
+                                  hovertemplate="<b>%{y}</b><br>%{customdata:.0f} negativos<extra></extra>"))
+            plotly_layout(fig2, alto=max(320, 34 * len(d) + 80))
+            fig2.update_layout(barmode="relative", margin=dict(l=10, r=30, t=10, b=10))
+            fig2.update_xaxes(showticklabels=False, zeroline=True, zerolinecolor=C["gris"], showgrid=False,
+                              range=[-(d["n_neg"].max() * 1.35 + 1), d["n_pos"].max() * 1.3 + 1])
+            fig2.update_yaxes(showgrid=False)
+            mostrar_plotly(fig2, key="pl_vb_bal")
+            st.caption("Clientes que mencionan cada tema, a la derecha en positivo y a la izquierda en negativo.")
+
+def vista_evolucion_temas(df_fytd):
+    """Mapa de calor tema x mes (menciones o satisfacción neta) con los temas más frecuentes del periodo."""
+    import plotly.graph_objects as go
+    metrica = st.radio("Métrica", ["% de menciones", "Satisfacción neta"], horizontal=True, key="vb_metrica", label_visibility="collapsed")
+    d = df_fytd.copy()
+    d["sat_neta"] = d["SATISFACCIÓN NETA"].apply(_clean_pct); d["menciones_pct"] = d["Comentarios relacionados"].apply(_clean_pct)
+    col = "menciones_pct" if metrica == "% de menciones" else "sat_neta"
+    top = d.groupby("Sub-Categoría")["menciones_pct"].sum().nlargest(14).index
+    d = d[d["Sub-Categoría"].isin(top) & (d["menciones_pct"] > 0)]
+    if d.empty: st.info("Sin datos para la evolución."); return
+    orden = d.drop_duplicates("mes_anio").sort_values("orden_mes")["mes_anio"].tolist()
+    piv = d.pivot_table(index="Sub-Categoría", columns="mes_anio", values=col, aggfunc="mean").reindex(columns=orden)
+    piv = piv.loc[piv.mean(axis=1).sort_values(ascending=(col == "sat_neta")).index]
+    if col == "menciones_pct":
+        esc = dict(colorscale=[[0, "#FFFFFF"], [1, C["navy"]]], zmin=0, zmax=float(np.nanmax(piv.values)) or 1)
+    else:
+        esc = dict(colorscale=[[0, "#D32F2F"], [0.5, "#FFFFFF"], [1, "#388E3C"]], zmin=50, zmax=100)
+    fig = go.Figure(go.Heatmap(z=piv.values, x=piv.columns, y=piv.index, text=piv.map(lambda v: "" if pd.isna(v) else f"{v:.0f}").values,
+                               texttemplate="%{text}%", showscale=False, xgap=2, ygap=2, **esc,
+                               hovertemplate="<b>%{y}</b><br>%{x}: %{z:.1f}%<extra></extra>"))
+    plotly_layout(fig, alto=max(360, 34 * len(piv) + 100), leyenda_abajo=False)
+    fig.update_yaxes(autorange="reversed", showgrid=False)
+    fig.update_xaxes(side="top")
+    mostrar_plotly(fig, key="pl_vb_evol")
+    st.caption("Muestra todos los meses del periodo (no solo el mes elegido). Con un solo mes procesado se verá una sola columna.")
+
+def vista_comentarios(meses_proc, fytd_sel):
+    """Comentarios reales de los clientes con filtros por tema, sentimiento, nota, dealer y asesor."""
+    dc = D["comentarios"]
+    if dc.empty:
+        st.info("Aún no hay comentarios cargados. Reprocesa los meses en el preprocesador actualizado (genera el archivo 15)."); return
+    dc = aplicar_filtro_ciudad(dc, CIUDAD)
+    dc = dc[(dc["fytd"] == fytd_sel) & (dc["mes_anio"].isin(meses_proc))].copy()
+    if dc.empty: st.info("Sin comentarios para la selección."); return
+    dc["temas"] = dc["temas"].fillna("")
+    temas = sorted({t.split(" - ", 1)[1].strip() for sx in dc["temas"] for t in sx.split(";")
+                    if " - " in t and not t.strip().lower().startswith("no verbalizado")})
+    f1, f2, f3, f4 = st.columns([1.4, 1.2, 1.3, 1.3])
+    tema_sel = f1.selectbox("Tema:", ["Todos"] + temas, key="vc_tema")
+    sent_sel = f2.multiselect("Sentimiento:", ["Positivo", "Negativo", "Mixto", "Sin tema"], default=["Positivo", "Negativo", "Mixto", "Sin tema"], key="vc_sent")
+    dealer_sel = f3.selectbox("Dealer:", ["Todos"] + sorted(x for x in dc["dealer"].unique() if x != "SIN DEALER"), key="vc_dlr")
+    base_aps = dc if dealer_sel == "Todos" else dc[dc["dealer"] == dealer_sel]
+    aps_sel = f4.selectbox("Asesor:", ["Todos"] + sorted(x for x in base_aps["aps_nombre"].unique() if "SIN ASESOR" not in str(x).upper()), key="vc_aps")
+    g1, g2, g3 = st.columns([1.6, 1.6, 1.6])
+    preguntas = sorted(dc["pregunta"].unique())
+    preg_sel = g1.multiselect("Pregunta:", preguntas, default=preguntas, key="vc_preg")
+    nota_lo, nota_hi = g2.slider("Nota de satisfacción:", 1, 10, (1, 10), key="vc_nota")
+    texto = g3.text_input("Buscar en el comentario:", key="vc_txt")
+
+    f = dc[dc["sentimiento"].isin(sent_sel) & dc["pregunta"].isin(preg_sel) & dc["satisfaccion"].between(nota_lo, nota_hi)]
+    if tema_sel != "Todos": f = f[f["temas"].str.contains(" - " + tema_sel, regex=False)]
+    if dealer_sel != "Todos": f = f[f["dealer"] == dealer_sel]
+    if aps_sel != "Todos": f = f[f["aps_nombre"] == aps_sel]
+    if texto.strip(): f = f[f["comentario"].str.contains(texto.strip(), case=False, regex=False)]
+    f = f.sort_values(["satisfaccion", "orden_mes"], ascending=[True, False])
+
+    h1, h2 = st.columns([3, 1])
+    h1.markdown(f"**{len(f)} comentarios** (ordenados de menor a mayor nota)")
+    if not f.empty:
+        h2.download_button("Descargar Excel", data=df_to_xlsx_bytes(f[["mes_anio", "dealer", "aps_nombre", "satisfaccion", "pregunta", "sentimiento", "temas", "comentario"]], "Comentarios"),
+                           file_name="Comentarios.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="vc_dl")
+    limite = st.session_state.get("vc_lim", 20)
+    for _, r in f.head(limite).iterrows():
+        col = _COL_SENT.get(r["sentimiento"], C["gris"])
+        chips = "".join(f"<span style='display:inline-block;background:#F0F1F5;border-radius:10px;padding:1px 9px;margin:2px 4px 0 0;font-size:11px;color:#444'>{_html.escape(t.strip())}</span>"
+                        for t in str(r["temas"]).split(";") if t.strip() and not t.strip().lower().startswith("no verbalizado"))
+        nota = "—" if pd.isna(r["satisfaccion"]) else f"{int(r['satisfaccion'])}"
+        st.markdown(
+            f"<div style='background:#fff;border-left:5px solid {col};border-radius:8px;padding:10px 14px;margin-bottom:8px;box-shadow:0 1px 6px rgba(26,26,46,.06)'>"
+            f"<div style='font-size:12px;color:#777;margin-bottom:4px'><b style='color:{col}'>Nota {nota}</b> · {_html.escape(str(r['pregunta']))} · "
+            f"{_html.escape(str(r['dealer']))} · {_html.escape(str(r['aps_nombre']))} · {_html.escape(str(r['mes_anio']))}</div>"
+            f"<div style='font-size:15px;color:#1A1A2E'>{_html.escape(str(r['comentario']))}</div>{chips}</div>", unsafe_allow_html=True)
+    if len(f) > limite:
+        if st.button(f"Mostrar más ({len(f) - limite} restantes)", key="vc_mas"):
+            st.session_state["vc_lim"] = limite + 20; st.rerun()
+
 def render_verbalizaciones():
-    st.markdown("<div class='seccion-titulo'>Análisis de Verbalizaciones del Cliente</div>",unsafe_allow_html=True)
-
+    st.markdown("<div class='seccion-titulo'>Verbalizaciones del cliente</div>", unsafe_allow_html=True)
     if D["verbaliz"].empty:
-        st.info("No hay datos de verbalizaciones cargados. Ve al preprocesador para subirlos."); return
-
-    # Pre-filtrar por ciudad antes de calcular meses disponibles
+        st.info("No hay verbalizaciones cargadas. Se generan al procesar el RawData en el preprocesador."); return
     df_base = aplicar_filtro_ciudad(D["verbaliz"].copy(), CIUDAD)
-
     if df_base.empty:
         st.info(f"Sin verbalizaciones para {CIUDAD}."); return
-
-    # mes_anio y orden_mes ya vienen reconstruidos desde cargar_datos()
-    # Verificación defensiva por si algún registro escapa la reconstrucción
-    if "mes_anio" not in df_base.columns:
-        df_base["mes_anio"] = np.nan
-    if "orden_mes" not in df_base.columns:
-        df_base["orden_mes"] = 0
+    if "mes_anio" not in df_base.columns: df_base["mes_anio"] = np.nan
+    if "orden_mes" not in df_base.columns: df_base["orden_mes"] = 0
     df_base = _reconstruir_mes_anio(df_base)
 
-    c1, c2, c3, c4 = st.columns([1.5, 1.5, 1, 1])
-    with c1:
-        fytd_sel = st.selectbox("Periodo:", todos_fytd, key="v_fytd_dash")
-
-    # Meses disponibles directamente desde verbalizaciones, no desde atributos
+    c1, c2, c3 = st.columns([1.5, 1.5, 1.4])
+    with c1: fytd_sel = st.selectbox("Periodo:", todos_fytd, key="v_fytd_dash")
     mm = meses_de(df_base, fytd_sel)
-
-    with c2:
-        mes_sel = st.selectbox("Mes/Año:", ["TODOS"] + mm if mm else ["TODOS"], key="v_mes_dash")
-
-    # Resetear acum si cambia el FYTD
-    if st.session_state.get("v_fytd_prev") != fytd_sel:
-        st.session_state.ver_acum = False
-        st.session_state.v_fytd_prev = fytd_sel
-
-    if "ver_acum" not in st.session_state:
-        st.session_state.ver_acum = False
-
+    with c2: mes_sel = st.selectbox("Mes/Año:", ["TODOS"] + mm if mm else ["TODOS"], index=len(mm) if mm else 0, key="v_mes_dash")
     with c3:
-        st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
-        if st.button("Cargar", key="v_btn", width="stretch", type="primary"):
-            st.session_state.ver_acum = False
-            st.rerun()
-    with c4:
-        st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
-        if st.button("ACUM", key="v_btn_acum", width="stretch"):
-            st.session_state.ver_acum = True
-            st.rerun()
+        st.markdown("<div style='margin-top:30px'></div>", unsafe_allow_html=True)
+        acum_v = st.toggle("Acumulado hasta el mes", key="v_acum")
+    if mes_sel == "TODOS": meses_proc = mm
+    elif acum_v: meses_proc = mm[:mm.index(mes_sel) + 1] if mes_sel in mm else []
+    else: meses_proc = [mes_sel]
+    if not meses_proc: st.warning("Sin datos para esta selección."); return
 
-    # Determinar meses a incluir
-    if mes_sel == "TODOS":
-        meses_proc = mm
-    elif st.session_state.ver_acum:
-        meses_proc = mm[:mm.index(mes_sel) + 1] if mes_sel in mm else []
-    else:
-        meses_proc = [mes_sel]
+    df_fytd = df_base[df_base["fytd"] == fytd_sel]
+    df = df_fytd[df_fytd["mes_anio"].isin(meses_proc)]
+    if df.empty: st.warning("Sin datos para esta selección."); return
+    agg = agregar_temas(df)
+    if agg.empty: st.info("No hay menciones registradas en este periodo."); return
 
-    if not meses_proc:
-        st.warning("Sin datos para esta selección."); return
+    # --- KPIs ---
+    top = agg.iloc[0]
+    pos = agg[agg["Categoría"] == "Positivo"]; neg = agg[agg["Categoría"] == "Negativo"]
+    peq = lambda t: f"<span style='font-size:20px;line-height:1.2;display:block'>{_html.escape(str(t))}</span>"
+    k = st.columns(4)
+    k[0].markdown(kpi_card("Temas mencionados", f"{len(agg)}", f"en {len(meses_proc)} mes(es)"), unsafe_allow_html=True)
+    k[1].markdown(kpi_card("Más mencionado", peq(top["Sub-Categoría"]), f"{top['menciones_pct']:.0f}% de los clientes · satisfacción neta {top['sat_neta']:.0f}%"), unsafe_allow_html=True)
+    k[2].markdown(kpi_card("Mayor fortaleza", peq(pos.iloc[0]["Sub-Categoría"]) if not pos.empty else "—",
+                           f"{pos.iloc[0]['menciones_pct']:.0f}% de menciones" if not pos.empty else "Sin temas positivos", color=C["ok"]), unsafe_allow_html=True)
+    k[3].markdown(kpi_card("Mayor alerta", peq(neg.iloc[0]["Sub-Categoría"]) if not neg.empty else "—",
+                           f"{neg.iloc[0]['menciones_pct']:.0f}% de menciones" if not neg.empty else "Sin temas negativos", color=C["mal"] if not neg.empty else C["ok"]), unsafe_allow_html=True)
+    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
-    # Filtrar por FYTD y meses (usando mes_anio)
-    df = df_base[
-        (df_base["fytd"] == fytd_sel) &
-        (df_base["mes_anio"].isin(meses_proc))
-    ].copy()
-
-    if df.empty:
-        st.warning("Sin datos para esta selección."); return
-
-    label_periodo = f"ACUM hasta {mes_sel}" if st.session_state.ver_acum and mes_sel != "TODOS" else mes_sel
-
-    def clean_pct(x):
-        try:
-            if pd.isna(x) or str(x).strip() in ["-", ""]: return 0.0
-            return float(str(x).split('%')[0].strip())
-        except: return 0.0
-
-    df["sat_neta"]      = df["SATISFACCIÓN NETA"].apply(clean_pct)
-    df["menciones_pct"] = df["Comentarios relacionados"].apply(clean_pct)
-
-    df_plot = df.groupby("Sub-Categoría").agg(
-        sat_neta=("sat_neta", "mean"),
-        menciones_pct=("menciones_pct", "sum"),
-        Categoría=("Categoría", "first")
-    ).reset_index()
-    df_graficos = df_plot[df_plot["menciones_pct"] > 0].reset_index(drop=True)
-
-    if df_graficos.empty:
-        st.info("No hay menciones registradas (mayores a 0%) en este periodo."); return
-
-    def titulo_grafica(texto):
-        return (
-            "<div style='text-align:center;margin-bottom:15px'>"
-            f"<div style='font-family:\"Barlow Condensed\",sans-serif;font-size:22px;"
-            f"font-weight:900;color:#1A1A2E;text-transform:uppercase;letter-spacing:1px'>{texto}</div>"
-            "<div style='width:50px;height:3px;background:#FFD600;margin:4px auto 0'></div></div>"
-        )
-
-    # =========================================================================
-    # GRÁFICA 1: MAPA DE IMPACTO
-    # =========================================================================
-    st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
-    st.markdown(titulo_grafica("Impacto Estratégico de Verbalizaciones"), unsafe_allow_html=True)
-
-    df_s1 = df_graficos.sort_values("menciones_pct", ascending=True)
-    n_items = len(df_s1)
-    fig1, ax1 = plt.subplots(figsize=(8, max(3.5, n_items * 0.38)), facecolor="white")
-    y_pos = np.arange(n_items)
-
-    ax1.hlines(y=y_pos, xmin=0, xmax=100, color='#EEEEEE', linewidth=1, zorder=1)
-    ax1.axvline(75, color=COLOR_OBJETIVO, linestyle='--', linewidth=1.5, zorder=2, alpha=0.6)
-
-    colors  = ['#D32F2F' if s < 60 else '#FF9800' if s < 85 else '#388E3C' for s in df_s1["sat_neta"]]
-    max_pct = df_s1["menciones_pct"].max() or 1
-    sizes   = (df_s1["menciones_pct"] / max_pct) * 900 + 300
-    ax1.scatter(df_s1["sat_neta"], y_pos, s=sizes, c=colors, alpha=0.9,
-                edgecolors="white", linewidth=1.0, zorder=3)
-    for i, s in enumerate(df_s1["sat_neta"]):
-        ax1.text(s, i, f"{s:.0f}%", ha='center', va='center',
-                 fontsize=9, color="white", fontweight='bold', zorder=4)
-
-    ax1.set_yticks(y_pos)
-    ax1.set_yticklabels([textwrap.fill(x, 30) for x in df_s1["Sub-Categoría"]],
-                        fontsize=9, fontweight='bold', color="#1A1A2E")
-    ax1.set_xticks([0, 20, 40, 60, 80, 100])
-    ax1.set_xlabel("Satisfacción Neta (%)", fontsize=10, fontweight='bold', labelpad=8)
-    ax1.set_xlim(-5, 105)
-    ax1.xaxis.set_major_formatter(mtick.PercentFormatter(100.0))
-    ax1.spines['top'].set_visible(False)
-    ax1.spines['right'].set_visible(False)
-    ax1.spines['left'].set_visible(False)
-    ax1.tick_params(axis='y', length=0)
-    plt.tight_layout()
-
-    buf1 = fig_to_buf(fig1)
-    st.image(buf1, width="stretch")
-    st.download_button("Descargar Mapa de Impacto",
-                       data=buf1.getvalue(),
-                       file_name=f"Impacto_Verbalizaciones_{label_periodo}.jpg",
-                       mime="image/jpeg", key="dl_verb_1")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # =========================================================================
-    # GRÁFICA 2: RANKING DE TEMAS
-    # =========================================================================
-    st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
-    st.markdown(titulo_grafica("Ranking de Temas más comentados"), unsafe_allow_html=True)
-
-    df_s2 = df_graficos.sort_values("menciones_pct", ascending=True).tail(12)
-    fig2, ax2 = plt.subplots(figsize=(10, 8), facecolor="white")
-    bar_colors = ['#D32F2F' if s < 75 else '#388E3C' for s in df_s2["sat_neta"]]
-    bars = ax2.barh(df_s2["Sub-Categoría"], df_s2["menciones_pct"], color=bar_colors, alpha=0.8)
-
-    for bar in bars:
-        ax2.text(bar.get_width() + 0.3, bar.get_y() + bar.get_height() / 2,
-                 f'{bar.get_width():.1f}%', va='center', fontsize=11,
-                 fontweight='bold', color="#1A1A2E")
-
-    max_val = df_s2["menciones_pct"].max() or 1
-    ax2.set_xlim(0, max_val * 1.18)
-    ax2.spines['top'].set_visible(False)
-    ax2.spines['right'].set_visible(False)
-    ax2.set_yticks(np.arange(len(df_s2)))
-    ax2.set_yticklabels([textwrap.fill(x, 28) for x in df_s2["Sub-Categoría"]],
-                        fontsize=11, fontweight='bold', color="#1A1A2E")
-    plt.tight_layout()
-
-    buf2 = fig_to_buf(fig2)
-    st.image(buf2, width="stretch")
-    st.download_button("Descargar Ranking de Temas",
-                       data=buf2.getvalue(),
-                       file_name=f"Ranking_Verbalizaciones_{label_periodo}.jpg",
-                       mime="image/jpeg", key="dl_verb_2")
-    st.markdown("</div>", unsafe_allow_html=True)
-
+    vistas = ["Mapa de temas", "Evolución", "Comentarios"]
+    vista = st.segmented_control("Vista", vistas, default=vistas[0], key="vb_vista", label_visibility="collapsed") or vistas[0]
+    if vista == vistas[0]: vista_mapa_temas(agg)
+    elif vista == vistas[1]: vista_evolucion_temas(df_fytd)
+    else: vista_comentarios(meses_proc, fytd_sel)
 
 # ==============================================================================
 # SECCIÓN 7: PERFIL APS
 # ==============================================================================
-def render_vista_aps():
+def _kpis_aps(aps, meses, fytd, ciudad):
+    """TRE e ISC de un asesor para una lista de meses."""
+    t = filtrar(D["tre_aps"], fytd=fytd, ciudad=ciudad, aps=aps); i = filtrar(D["isc_aps"], fytd=fytd, ciudad=ciudad, aps=aps)
+    t = t[t["mes_anio"].isin(meses)] if not t.empty else t; i = i[i["mes_anio"].isin(meses)] if not i.empty else i
+    E = t["E"].sum() if not t.empty else 0; Cc = t["C"].sum() if not t.empty else 0
+    enc = i["total_encuestas"].sum() if not i.empty else 0
+    pen = (i["I16"].sum() * 2 + i["I78"].sum()) if not i.empty else 0
+    return {"E": E, "C": Cc, "enc": enc, "tre": Cc / E if E > 0 else np.nan, "isc": (enc - pen) / enc if enc > 0 else np.nan}
 
+def fig_evolucion_simple(meses, vals, meta, color, nombre):
+    """Línea mensual de un indicador contra su meta (interactiva)."""
+    import plotly.graph_objects as go
+    fig = go.Figure(go.Scatter(x=meses, y=vals, mode="lines+markers+text", name=nombre, line=dict(color=color, width=4),
+                               marker=dict(size=10, color="white", line=dict(color=color, width=3)),
+                               text=[("" if v != v else f"{v:.0%}") for v in vals], textposition="top center", textfont=dict(size=13),
+                               hovertemplate="%{x}: %{y:.1%}<extra></extra>"))
+    fig.add_hline(y=meta, line_dash="dash", line_color=C["naranja"], annotation_text=f"Meta {meta:.0%}", annotation_position="top left")
+    todos = [v for v in vals if v == v] + [meta]
+    plotly_layout(fig, alto=300, leyenda_abajo=False)
+    fig.update_yaxes(tickformat=".0%", range=[max(0, min(todos) - 0.08), min(1.05, max(todos) + 0.08)])
+    return fig
+
+def render_vista_aps():
     st.markdown("""
         <style>
             .stSelectbox label p { font-size: 18px !important; font-weight: bold !important; color: #1A1A2E !important; }
             .tabla-voc { border: 2px solid #1A1A2E !important; border-collapse: collapse !important; width: 100% !important; }
-            .tabla-voc td { font-size: 18px !important; color: #000000 !important; font-weight: bold !important; border: 1px solid #CFD8DC !important; padding: 8px !important; }
-            .tabla-voc th { font-size: 18px !important; color: #FFFFFF !important; background-color: #1A1A2E !important; font-weight: bold !important; border: 1px solid #1A1A2E !important; padding: 10px !important; text-align: center !important; }
+            .tabla-voc td { font-size: 16px !important; color: #000000 !important; font-weight: bold !important; border: 1px solid #CFD8DC !important; padding: 8px !important; }
+            .tabla-voc th { font-size: 16px !important; color: #FFFFFF !important; background-color: #1A1A2E !important; font-weight: bold !important; border: 1px solid #CFD8DC !important; }
         </style>
     """, unsafe_allow_html=True)
-
-    st.markdown("<div class='seccion-titulo' style='color:#1A1A2E; font-size:28px;'>Perfil Individual del Asesor de Servicio</div>",unsafe_allow_html=True)
-
-    c1, c2, c3, c4 = st.columns([1.5, 1.5, 3, 1])
+    st.markdown("<div class='seccion-titulo'>Mi tablero — Asesor de servicio</div>", unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns([1.3, 1.3, 3, 1.4])
     with c1: fytd_sel = st.selectbox("Periodo:", todos_fytd, key="aps_fytd")
     with c2:
         mm = meses_de(D["isc_aps"], fytd_sel, CIUDAD)
-        mes_sel = st.selectbox("Mes/Año:", ["TODOS"] + mm if mm else ["TODOS"], key="aps_mes")
+        mes_sel = st.selectbox("Mes/Año:", ["TODOS"] + mm if mm else ["TODOS"], index=len(mm) if mm else 0, key="aps_mes")
     with c3:
-        aps_opts = aps_para_filtro(CIUDAD, "GENERAL", fytd_sel)
-        aps_opts = [a for a in aps_opts if a != "TODOS"]
+        aps_opts = [a for a in aps_para_filtro(CIUDAD, "GENERAL", fytd_sel) if a != "TODOS"]
         aps_sel = st.selectbox("Selecciona tu nombre (APS):", aps_opts if aps_opts else ["Sin asesores"], key="aps_sel")
-    
-    if "aps_acum" not in st.session_state: st.session_state.aps_acum = False
     with c4:
-        st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
-        if st.button("ACUM", key="btn_aps_acum", width="stretch", type="primary" if st.session_state.aps_acum else "secondary"):
-            st.session_state.aps_acum = not st.session_state.aps_acum
-            st.rerun()
-
-    if not aps_opts or aps_sel == "Sin asesores": 
+        st.markdown("<div style='margin-top:30px'></div>", unsafe_allow_html=True)
+        acum = st.toggle("Acumulado hasta el mes", key="aps_acum_t")
+    st.session_state.aps_acum = acum
+    if not aps_opts or aps_sel == "Sin asesores":
         st.info("No hay asesores registrados para esta selección."); return
 
-    acum = st.session_state.aps_acum
-    meses_proc = mm if mes_sel == "TODOS" else [mes_sel]
-    
+    if mes_sel == "TODOS": meses_proc = mm
+    elif acum: meses_proc = mm[:mm.index(mes_sel) + 1] if mes_sel in mm else []
+    else: meses_proc = [mes_sel]
+    if not meses_proc: st.warning("Sin datos para esta selección."); return
+
     df_tre_all = filtrar(D["tre_aps"], fytd=fytd_sel, ciudad=CIUDAD, aps=aps_sel)
     df_isc_all = filtrar(D["isc_aps"], fytd=fytd_sel, ciudad=CIUDAD, aps=aps_sel)
-    
-    df_tre_sel = df_tre_all[df_tre_all["mes_anio"].isin(meses_proc)]
-    df_isc_sel = df_isc_all[df_isc_all["mes_anio"].isin(meses_proc)]
-    
-    obj_tre = get_obj(D["objetivos"], fytd_sel, "obj_tre")
-    obj_isc = get_obj(D["objetivos"], fytd_sel, "obj_isc")
-    
-    e_tot = df_tre_sel["E"].sum(); c_tot = df_tre_sel["C"].sum()
-    tre_val = c_tot / e_tot if e_tot > 0 else 0
-    enc_tot = df_isc_sel["total_encuestas"].sum()
-    isc_val = (enc_tot - df_isc_sel["I16"].sum()*2 - df_isc_sel["I78"].sum()) / enc_tot if enc_tot > 0 else 0
+    obj_tre = get_obj(D["objetivos"], fytd_sel, "obj_tre"); obj_isc = get_obj(D["objetivos"], fytd_sel, "obj_isc")
+    K = _kpis_aps(aps_sel, meses_proc, fytd_sel, CIUDAD)
+    e_tot, c_tot, enc_tot = K["E"], K["C"], K["enc"]
+    tre_val = K["tre"] if K["tre"] == K["tre"] else 0
+    isc_val = K["isc"] if K["isc"] == K["isc"] else 0
+    color_estado = _color_kpi
 
-    def color_estado(val, obj):
-        if val >= obj: return "#388E3C"
-        elif val >= obj - 0.03: return "#F57F17"
-        else: return "#D32F2F"
+    # variación contra el periodo anterior
+    prev = None; ref_txt = ""
+    if mes_sel != "TODOS":
+        if acum and len(meses_proc) > 1: prev = _kpis_aps(aps_sel, meses_proc[:-1], fytd_sel, CIUDAD); ref_txt = f"vs acum. a {meses_proc[-2]}"
+        elif not acum and mm.index(mes_sel) > 0:
+            prev = _kpis_aps(aps_sel, [mm[mm.index(mes_sel) - 1]], fytd_sel, CIUDAD); ref_txt = f"vs {mm[mm.index(mes_sel) - 1]}"
+    dpp = lambda now, k: None if prev is None or prev[k] != prev[k] or now != now else (now - prev[k]) * 100
 
-    # =========================================================================
-    # 1. KPIs Y RANKING
-    # =========================================================================
-    k1, k2, k3 = st.columns(3)
-    with k1: st.markdown(kpi_html("Encuestas Enviadas", e_tot, "{:.0f}", f"Objetivo TRE: {obj_tre:.0%}"), unsafe_allow_html=True)
-    with k2: st.markdown(kpi_html("Resultado TRE", tre_val, "{:.1%}", "Eficiencia", color=color_estado(tre_val, obj_tre)), unsafe_allow_html=True)
-    with k3: st.markdown(kpi_html("Resultado ISC", isc_val, "{:.1%}", f"Meta ISC: {obj_isc:.0%}", color=color_estado(isc_val, obj_isc)), unsafe_allow_html=True)
+    # ranking de asesores de la ciudad
+    rb = filtrar(D["isc_aps"], fytd=fytd_sel, ciudad=CIUDAD); rb = rb[rb["mes_anio"].isin(meses_proc)]
+    rt_ = filtrar(D["tre_aps"], fytd=fytd_sel, ciudad=CIUDAD); rt_ = rt_[rt_["mes_anio"].isin(meses_proc)] if not rt_.empty else rt_
+    rk = rb.groupby("aps_nombre").agg(enc=("total_encuestas", "sum"), i16=("I16", "sum"), i78=("I78", "sum")).reset_index()
+    rk = rk[~rk["aps_nombre"].astype(str).str.upper().str.contains("SIN ASESOR", na=False)]
+    rk["prom_isc"] = np.where(rk["enc"] > 0, (rk["enc"] - rk["i16"] * 2 - rk["i78"]) / rk["enc"].where(rk["enc"] > 0), 0)
+    rk = rk.merge(rt_.groupby("aps_nombre").agg(E=("E", "sum"), C=("C", "sum")).reset_index() if not rt_.empty else pd.DataFrame({"aps_nombre": [], "E": [], "C": []}),
+                  on="aps_nombre", how="left").fillna({"E": 0, "C": 0})
+    df_rd = rk.sort_values("prom_isc", ascending=False).reset_index(drop=True)
+    my_p = int(df_rd[df_rd["aps_nombre"] == aps_sel].index[0]) + 1 if aps_sel in df_rd["aps_nombre"].values else None
 
-    st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
-    c_rank, c_kpi = st.columns([2, 1.2])
-    
-    df_rank_base = filtrar(D["isc_aps"], fytd=fytd_sel, ciudad=CIUDAD, dealer=None)
-    df_rank_base = df_rank_base[df_rank_base["mes_anio"].isin(meses_proc)]
-    rank_list = []
-    for a_n, g in df_rank_base.groupby("aps_nombre"):
-        if "SIN ASESOR" in str(a_n).upper(): continue
-        et = g["total_encuestas"].sum()
-        rank_list.append({"aps": a_n, "isc": (et - g["I16"].sum()*2 - g["I78"].sum())/et if et > 0 else 0})
-    df_r = pd.DataFrame(rank_list).sort_values("isc", ascending=True)
-    df_rd = df_r.sort_values("isc", ascending=False).reset_index(drop=True)
-    my_p = df_rd[df_rd["aps"] == aps_sel].index[0] + 1 if aps_sel in df_rd["aps"].values else "-"
-    
-    with c_rank:
-        st.markdown("<h6 style='color:#1A1A2E; font-weight:bold; font-size:18px;'>Ranking ISC de Asesores</h6>", unsafe_allow_html=True)
-        fig_r, ax_r = plt.subplots(figsize=(8, max(4, len(df_r)*0.45)), facecolor="white")
-        bars = ax_r.barh(df_r["aps"], df_r["isc"], color=[color_estado(v, obj_isc) for v in df_r["isc"]], height=0.6)
-        for i, bar in enumerate(bars):
-            is_me = (df_r["aps"].iloc[i] == aps_sel)
-            bar.set_alpha(1.0 if is_me else 0.4); bar.set_edgecolor('#000' if is_me else 'none'); bar.set_linewidth(2 if is_me else 0)
-            ax_r.text(bar.get_width()+0.01, bar.get_y()+bar.get_height()/2, f"{bar.get_width():.1%}", va='center', fontsize=11 if is_me else 9, fontweight='bold')
-        ax_r.axvline(obj_isc, color=COLOR_OBJETIVO, linestyle="--", alpha=0.4)
-        ax_r.set_xlim(0, 1.15); ax_r.tick_params(axis='y', length=0)
-        st.pyplot(fig_r); plt.close(fig_r)
+    # pendientes del asesor (contactos vigentes) y alertas de clientes
+    _pend_aps = aplicar_filtro_ciudad(D["pendientes"], CIUDAD)
+    if {"aps_nombre", "status", "fecha_validez"}.issubset(_pend_aps.columns):
+        _pend_aps = _pend_aps[(_pend_aps["aps_nombre"] == aps_sel) & (_pend_aps["status"] == "Contacto en uso")]
+    else:
+        _pend_aps = pd.DataFrame(columns=["cliente_nombre", "vehiculo", "vin", "fecha_validez"])
+    _venc_aps = pd.to_datetime(_pend_aps["fecha_validez"], format='mixed', dayfirst=True, errors='coerce') < pd.Timestamp.today().normalize()
+    vivas = int((~_venc_aps).sum()); exp = int(_venc_aps.sum())
+    al_todas = alertas_cliente(aps_sel, None, CIUDAD, fytd_sel)
+    al_pend = al_todas[al_todas["estado"] == "Pendiente"] if not al_todas.empty else al_todas
 
-    with c_kpi:
-        # Pendientes vigentes del asesor (contacto en uso y aún no vencidas), misma lógica que la sección Pendientes
-        _pend_aps = aplicar_filtro_ciudad(D["pendientes"], CIUDAD)
-        if {"aps_nombre", "status", "fecha_validez"}.issubset(_pend_aps.columns):
-            _pend_aps = _pend_aps[(_pend_aps["aps_nombre"] == aps_sel) & (_pend_aps["status"] == "Contacto en uso")]
-        else:
-            _pend_aps = pd.DataFrame(columns=["cliente_nombre", "vehiculo", "vin", "fecha_validez"])
-        _venc_aps = pd.to_datetime(_pend_aps["fecha_validez"], format='mixed', dayfirst=True, errors='coerce') < pd.Timestamp.today().normalize()
-        vivas = int((~_venc_aps).sum())
-        # Mismas alertas que el correo Kaizen (espejo)
-        import html as _h
-        cajas_alerta = "".join(
-            f"""<div style="background:{FONDO_ALERTA.get(c, '#F5F5F5')}; border: 1px solid {c}; border-radius: 10px; padding: 12px 15px; text-align: center; width: 100%; margin-bottom: 10px;"><span style="color:{c}; font-size: 15px; line-height: 1.4;">{_h.escape(m)}</span></div>"""
-            for m, c in alertas_metas(isc_val, obj_isc, enc_tot, tre_val, obj_tre, e_tot))
-        st.markdown(f"""
-        <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; padding-top:20px;">
-            <div style="width: 190px; height: 190px; border-radius: 50%; background-color: #FFFFFF; display: flex; align-items: center; justify-content: center; box-shadow: 0 8px 16px rgba(0,0,0,0.15); border: 6px solid #FFD600; margin-bottom: 25px;">
-                <div style="text-align: center;">
-                    <span style="color: #444; font-size: 18px; font-weight: bold; text-transform: uppercase;">Puesto</span><br>
-                    <span style="color: #1A1A2E; font-size: 54px; font-weight: 900; font-family: 'Barlow Condensed'; line-height: 1;">#{my_p}</span><br>
-                    <span style="color: #1A1A2E; font-size: 18px; font-weight: bold;">de {len(df_rd)}</span>
-                </div>
-            </div>
-            {cajas_alerta}
-        </div>
-        """, unsafe_allow_html=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+    # ===================== 1. LO URGENTE HOY =====================
+    if not al_pend.empty:
+        st.markdown(f"<div class='card-titulo' style='color:#C62828'>Urgente: {len(al_pend)} cliente(s) insatisfecho(s) por contactar en 24 h</div>", unsafe_allow_html=True)
+        tarjetas_alertas(al_pend)
+    if vivas:
+        st.markdown(f"<div class='banner-alerta' style='background:#FFF8E1;border-left-color:#F57F17;color:#5D4037'>Tienes <b>{vivas}</b> encuesta(s) pendiente(s) de respuesta: "
+                    f"contacta a esos clientes antes de que venza el plazo (ver Agenda más abajo).</div>", unsafe_allow_html=True)
+    if al_pend.empty and not vivas:
+        st.markdown("<div class='banner-alerta' style='background:#E8F5E9;border-left-color:#388E3C;color:#1B5E20'>Sin urgencias: no tienes alertas ni contactos pendientes. ¡Buen trabajo!</div>", unsafe_allow_html=True)
 
-    # =========================================================================
-    # 2. GESTIÓN Y AGENDA
-    # =========================================================================
-    # Alertas de clientes insatisfechos del asesor (solo si tiene casos en el periodo elegido)
-    _al_aps = alertas_cliente(aps_sel, None, CIUDAD, fytd_sel)
-    if not _al_aps.empty: _al_aps = _al_aps[_al_aps["mes_anio"].isin(meses_proc)]
-    if not _al_aps.empty:
-        _n_p = int((_al_aps["estado"] == "Pendiente").sum()); _n_v = int((_al_aps["estado"] == "Vencida").sum())
-        st.markdown(f"<h5 style='color:#C62828; margin-top:25px; font-weight:bold;'>Alertas de clientes insatisfechos — contactar en 24 h ({_n_p} por atender · {_n_v} vencidas)</h5>", unsafe_allow_html=True)
-        st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
-        _t_al = tabla_alertas_detalle(_al_aps).drop(columns=["Asesor"])
-        st.markdown(tabla_html(_estilo_alertas(_t_al)), unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+    # ===================== 2. MIS NÚMEROS =====================
+    k = st.columns(4)
+    k[0].markdown(kpi_card("Encuestas enviadas", f"{e_tot:,.0f}", f"Meta TRE {obj_tre:.0%}",
+                           delta_chip(None if prev is None else e_tot - prev["E"], "abs", ref_txt)), unsafe_allow_html=True)
+    k[1].markdown(kpi_card("Mi TRE", f"{tre_val:.1%}", f"{c_tot:.0f} respondidas de {e_tot:.0f}", delta_chip(dpp(K["tre"], "tre"), "pp", ref_txt),
+                           color=color_estado(tre_val, obj_tre)), unsafe_allow_html=True)
+    k[2].markdown(kpi_card("Mi ISC", f"{isc_val:.1%}", f"Meta {obj_isc:.0%} · {enc_tot:.0f} encuestas", delta_chip(dpp(K["isc"], "isc"), "pp", ref_txt),
+                           color=color_estado(isc_val, obj_isc)), unsafe_allow_html=True)
+    k[3].markdown(kpi_card("Mi puesto", f"#{my_p}" if my_p else "—", f"de {len(df_rd)} asesores (por ISC)"), unsafe_allow_html=True)
+    st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
 
-    st.markdown("<h5 style='color:#1A1A2E; margin-top:25px; font-weight:bold;'>Gestión de Encuestas y Agenda</h5>", unsafe_allow_html=True)
-    exp = int(_venc_aps.sum())  # contacto en uso con fecha de validez ya pasada
+    col_rk, col_msg = st.columns([2, 1.2])
+    with col_rk, st.container(key="card_aps_rank"):
+        st.markdown("<div class='card-titulo'>Ranking ISC de asesores</div>", unsafe_allow_html=True)
+        fr = fig_ranking_aps(df_rd, obj_isc, resaltar=aps_sel)
+        if fr is not None: mostrar_plotly(fr, key="pl_aps_rank")
+        else: st.info("Sin datos para el ranking.")
+    with col_msg:
+        for m, c in alertas_metas(isc_val, obj_isc, enc_tot, tre_val, obj_tre, e_tot):
+            st.markdown(f"<div style='background:{FONDO_ALERTA.get(c, '#F5F5F5')};border:1px solid {c};border-radius:10px;padding:12px 15px;margin-bottom:10px;color:{c};font-size:15px;line-height:1.4'>{_html.escape(m)}</div>",
+                        unsafe_allow_html=True)
+
+    # ===================== 3. AGENDA =====================
+    st.markdown("<div class='card-titulo'>Gestión de encuestas y agenda</div>", unsafe_allow_html=True)
     i1, i2, i3 = st.columns(3)
-    with i1: st.markdown(kpi_html("Llenadas", c_tot, "{:.0f}", "Éxito", color="#388E3C"), unsafe_allow_html=True)
-    with i2: st.markdown(kpi_html("Vencidas", exp, "{:.0f}", "Pérdida", color="#D32F2F"), unsafe_allow_html=True)
-    with i3: st.markdown(kpi_html("Pendientes", vivas, "{:.0f}", "Acción hoy", color="#F57F17"), unsafe_allow_html=True)
+    i1.markdown(kpi_card("Llenadas", f"{c_tot:.0f}", "Éxito", color=C["ok"]), unsafe_allow_html=True)
+    i2.markdown(kpi_card("Vencidas", f"{exp}", "Pérdida", color=C["mal"]), unsafe_allow_html=True)
+    i3.markdown(kpi_card("Pendientes", f"{vivas}", "Acción hoy", color=C["alerta"]), unsafe_allow_html=True)
+    with st.container(key="card_aps_agenda"):
+        st.markdown("<div class='card-titulo'>Agenda activa: clientes a contactar ahora</div>", unsafe_allow_html=True)
+        df_p_show = _pend_aps.loc[~_venc_aps].reindex(columns=["cliente_nombre", "vehiculo", "vin", "fecha_validez"]).copy()
+        if not df_p_show.empty:
+            df_p_show["vehiculo"] = _col_txt(df_p_show, "vehiculo"); df_p_show["vin"] = _col_txt(df_p_show, "vin")
+            df_p_show.columns = ["Nombre del Cliente", "Vehículo", "VIN", "Vence en"]
+            _fv_agenda = pd.to_datetime(df_p_show["Vence en"], format='mixed', dayfirst=True, errors='coerce')
+            df_p_show["Vence en"] = (_fv_agenda - pd.Timedelta(days=1)).dt.strftime('%d/%m/%Y')
+            st.markdown(tabla_html(df_p_show.style.hide(axis="index").set_table_attributes('class="tabla-voc"')), unsafe_allow_html=True)
+        else: st.success("¡Sin pendientes!")
 
-    st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
-    st.markdown("<h4 style='color:#1A1A2E; font-weight:bold;'>Agenda Activa: Clientes a contactar ahora</h4>", unsafe_allow_html=True)
-    df_p_show = _pend_aps.loc[~_venc_aps].reindex(columns=["cliente_nombre", "vehiculo", "vin", "fecha_validez"]).copy()
-    if not df_p_show.empty:
-        df_p_show["vehiculo"] = _col_txt(df_p_show, "vehiculo"); df_p_show["vin"] = _col_txt(df_p_show, "vin")
-        df_p_show.columns = ["Nombre del Cliente", "Vehículo", "VIN", "Vence en"]
-        _fv_agenda = pd.to_datetime(df_p_show["Vence en"], format='mixed', dayfirst=True, errors='coerce')
-        df_p_show["Vence en"] = (_fv_agenda - pd.Timedelta(days=1)).dt.strftime('%d/%m/%Y')
-        st.markdown(tabla_html(df_p_show.style.hide(axis="index").set_table_attributes('class="tabla-voc"')), unsafe_allow_html=True)
-    else: st.success("¡Sin pendientes!")
-    st.markdown("</div>", unsafe_allow_html=True)
+    # historial de alertas del periodo (si hay)
+    al_per = al_todas[al_todas["mes_anio"].isin(meses_proc)] if not al_todas.empty else al_todas
+    if not al_per.empty:
+        with st.expander(f"Mis alertas del periodo ({len(al_per)})"):
+            st.markdown(tabla_html(_estilo_alertas(tabla_alertas_detalle(al_per).drop(columns=["Asesor"]))), unsafe_allow_html=True)
 
-    # =========================================================================
-    # 3. ATRIBUTOS TOP 3
-    # =========================================================================
+    # ===================== 4. FOCO DE MEJORA =====================
     df_at = filtrar(D["atrib_aps"], fytd=fytd_sel, ciudad=CIUDAD, aps=aps_sel)
     df_at = df_at[df_at["mes_anio"].isin(meses_proc)]
     fort, aler = [], []
@@ -2697,74 +2731,28 @@ def render_vista_aps():
                 st.markdown(f"<div style='background:{c_hex}; border-left:5px solid {'#4CAF50' if 'Fort' in tit else '#F44336'}; padding:10px; margin-bottom:5px; border-radius:4px;'><span style='color:#000; font-weight:bold; font-size:14px;'>{x['attr']}</span><br><span style='font-size:19px; font-weight:900; color:#000;'>{x['val']:.1%}</span> <span style='font-size:12px; color:#444; font-weight:bold;'>(Meta: {x['meta']:.0%})</span></div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # =========================================================================
-    # 4. EVOLUCIÓN HISTÓRICA (ISC Y TRE)
-    # =========================================================================
-    st.markdown("<h5 style='color:#1A1A2E; margin-top:25px; font-weight:bold;'>Evolución de Mis Indicadores</h5>", unsafe_allow_html=True)
-    
-    halo = [path_effects.withStroke(linewidth=3.5, foreground="white", alpha=0.9)]
-    
+    # ===================== 5. EVOLUCIÓN =====================
+    st.markdown("<div class='card-titulo'>Evolución de mis indicadores</div>", unsafe_allow_html=True)
     def get_hist(df_base, tipo="isc"):
         hist = []
-        for m in mm:
-            if m not in df_base["mes_anio"].values: hist.append(np.nan); continue
-            if acum: df_m = df_base[df_base["orden_mes"] <= df_base[df_base["mes_anio"]==m]["orden_mes"].values[0]]
-            else: df_m = df_base[df_base["mes_anio"] == m]
-            
+        for m_ in mm:
+            if m_ not in df_base["mes_anio"].values: hist.append(np.nan); continue
+            if acum: df_m = df_base[df_base["orden_mes"] <= df_base[df_base["mes_anio"] == m_]["orden_mes"].values[0]]
+            else: df_m = df_base[df_base["mes_anio"] == m_]
             if tipo == "isc":
                 et = df_m["total_encuestas"].sum()
-                hist.append((et - df_m["I16"].sum()*2 - df_m["I78"].sum())/et if et > 0 else np.nan)
+                hist.append((et - df_m["I16"].sum() * 2 - df_m["I78"].sum()) / et if et > 0 else np.nan)
             else:
                 et = df_m["E"].sum()
-                hist.append(df_m["C"].sum()/et if et > 0 else np.nan)
+                hist.append(df_m["C"].sum() / et if et > 0 else np.nan)
         return hist
-
-    vals_isc = get_hist(df_isc_all, "isc")
-    vals_tre = get_hist(df_tre_all, "tre")
-    
-    c_ev1, c_ev2 = st.columns(2)
-    
-    with c_ev1:
-        st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
-        st.markdown("<h6 style='text-align:center; color:#1A1A2E; font-size:18px;'>Evolución Mensual ISC</h6>", unsafe_allow_html=True)
-        
-        fig_e1, ax_e1 = plt.subplots(figsize=(8, 5.5), facecolor="white")
-        ax_e1.plot(mm, vals_isc, marker='o', color='#1976D2', linewidth=3, markersize=8, label="Mi ISC")
-        ax_e1.fill_between(mm, vals_isc, color='#1976D2', alpha=0.1)
-        ax_e1.axhline(obj_isc, color='#D32F2F', linestyle='--', label=f"Meta ({obj_isc:.0%})")
-        
-        for i, v in enumerate(vals_isc):
-            if pd.notna(v): 
-                ax_e1.text(i, v+0.02, f"{v:.1%}", ha='center', fontweight='900', fontsize=13, color="#1A1A2E", path_effects=halo)
-                
-        ax_e1.set_ylim(min(0.4, min([x for x in vals_isc if pd.notna(x)] or [0.4])-0.1), 1.05)
-        ax_e1.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
-        ax_e1.tick_params(axis='y', labelsize=12)
-        ax_e1.spines['top'].set_visible(False); ax_e1.spines['right'].set_visible(False)
-        plt.xticks(rotation=45, fontsize=12); plt.tight_layout()
-        st.pyplot(fig_e1); plt.close(fig_e1)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with c_ev2:
-        st.markdown("<div class='chart-box'>", unsafe_allow_html=True)
-        st.markdown("<h6 style='text-align:center; color:#1A1A2E; font-size:18px;'>Evolución Mensual TRE</h6>", unsafe_allow_html=True)
-        
-        fig_e2, ax_e2 = plt.subplots(figsize=(8, 5.5), facecolor="white")
-        ax_e2.plot(mm, vals_tre, marker='s', color='#388E3C', linewidth=3, markersize=8, label="Mi TRE")
-        ax_e2.fill_between(mm, vals_tre, color='#388E3C', alpha=0.1)
-        ax_e2.axhline(obj_tre, color='#1A1A2E', linestyle='--', alpha=0.5, label=f"Meta ({obj_tre:.0%})")
-        
-        for i, v in enumerate(vals_tre):
-            if pd.notna(v): 
-                ax_e2.text(i, v+0.02, f"{v:.1%}", ha='center', fontweight='900', fontsize=13, color="#1A1A2E", path_effects=halo)
-                
-        ax_e2.set_ylim(min(0.2, min([x for x in vals_tre if pd.notna(x)] or [0.2])-0.1), 1.05)
-        ax_e2.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
-        ax_e2.tick_params(axis='y', labelsize=12)
-        ax_e2.spines['top'].set_visible(False); ax_e2.spines['right'].set_visible(False)
-        plt.xticks(rotation=45, fontsize=12); plt.tight_layout()
-        st.pyplot(fig_e2); plt.close(fig_e2)
-        st.markdown("</div>", unsafe_allow_html=True)
+    ev1, ev2 = st.columns(2)
+    with ev1, st.container(key="card_aps_ev_isc"):
+        st.markdown("<div class='card-titulo'>Mi ISC por mes</div>", unsafe_allow_html=True)
+        mostrar_plotly(fig_evolucion_simple(mm, get_hist(df_isc_all, "isc"), obj_isc, "#1976D2", "Mi ISC"), key="pl_aps_isc")
+    with ev2, st.container(key="card_aps_ev_tre"):
+        st.markdown("<div class='card-titulo'>Mi TRE por mes</div>", unsafe_allow_html=True)
+        mostrar_plotly(fig_evolucion_simple(mm, get_hist(df_tre_all, "tre"), obj_tre, "#388E3C", "Mi TRE"), key="pl_aps_tre")
 
 # ==============================================================================
 # SECCIÓN DE INICIO
@@ -2804,10 +2792,9 @@ def render_caratula():
 # ==============================================================================
 sec = st.session_state.get("seccion", "caratula")
 if   sec == "caratula":       render_caratula()
-elif sec == "general":        render_general()
-elif sec == "tendencia":      render_tendencia()
-elif sec == "atributos":      render_atributos()
-elif sec == "radial":         render_radial()
+elif sec in ("general", "tendencia"): render_general()
+elif sec in ("atributos", "radial"): render_atributos()
+elif sec == "embudo":         render_embudo()
 elif sec == "alertas":        render_alertas()
 elif sec == "pendientes":     render_pendientes()
 elif sec == "verbalizaciones": render_verbalizaciones()
